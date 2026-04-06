@@ -1,0 +1,4 @@
+{
+  "name": "d2c",
+  "description": "Design-aware iterative code generation from Figma to production-ready frontend code. Supports React/Next.js, Vue/Nuxt, Svelte/SvelteKit, Angular, Solid.js/SolidStart, and Astro. Generates design tokens from your codebase, pulls Figma designs via MCP, generates code matching your project conventions, and visually verifies output via Playwright screenshot comparison — iterating until the result matches the design."
+}

@@ -1,0 +1,26 @@
+{
+  "name": "d2c",
+  "owner": {
+    "name": "Karthik Chinasani"
+  },
+  "metadata": {
+    "description": "Design-aware iterative code generation from Figma to production-ready frontend code. Supports React/Next.js, Vue/Nuxt, Svelte/SvelteKit, Angular, Solid.js/SolidStart, and Astro.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "d2c",
+      "source": ".",
+      "description": "Generates design tokens from your codebase, pulls Figma designs via MCP, generates code matching your project conventions (React/Next.js, Vue/Nuxt, Svelte/SvelteKit, Angular, Solid.js, Astro), and visually verifies output via Playwright screenshot comparison.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Karthik Chinasani"
+      },
+      "homepage": "https://github.com/d2c-ai/d2c",
+      "repository": "https://github.com/d2c-ai/d2c",
+      "license": "MIT",
+      "keywords": ["figma", "design", "react", "nextjs", "vue", "nuxt", "svelte", "angular", "solid", "astro", "code-generation", "d2c"],
+      "category": "productivity"
+    }
+  ]
+}
