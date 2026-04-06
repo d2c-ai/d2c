@@ -668,14 +668,56 @@ After the audit:
 
 0. **Delete the checkpoint file.** Remove `.claude/design-tokens/.d2c-build-checkpoint.json` if it exists. The build completed successfully — no resume needed.
 1. Ensure all new components are properly exported and TypeScript types are correct.
-2. Summarize what was built:
-   - Files created or modified (with paths)
-   - New reusable components introduced
-   - Existing components reused from the project
-   - **Score progression across rounds** (e.g., "Round 1: 72.3% → Round 2: 88.1% → Round 3: 95.4%")
-   - **Fixes applied per round** (e.g., "Round 1: fixed header bg color, card spacing. Round 2: fixed font sizes, button padding.")
-   - Final match score
-   - Any remaining known differences from the Figma (with diff image reference)
+2. **Display the Build Report.** Output the following 3 tables as the build summary. Use the exact table formats below, filling in actual values from this build.
+
+   **Table 1 — Build Summary**
+
+   ```
+   | Field            | Value                              |
+   |------------------|------------------------------------|
+   | Component        | <component_name from intake>       |
+   | Complexity       | <Simple / Medium / Complex>        |
+   | Framework        | <framework + meta_framework>       |
+   | Final Score      | <final pixel-diff match %>         |
+   | Threshold        | <THRESHOLD value>%                 |
+   | Rounds Used      | <rounds_completed> / <MAX_ROUNDS> max |
+   | Files Created    | <count>                            |
+   | Files Modified   | <count>                            |
+   | Plateau Detected | <Yes / No>                         |
+   ```
+
+   **Table 2 — Round-by-Round Progression**
+
+   One row per verification round. Delta = score difference from the previous round. Round 1 delta is always "—".
+
+   ```
+   | Round | Score  | Delta  | Fixes Applied                        |
+   |-------|--------|--------|--------------------------------------|
+   | 1     | 72.3%  | —      | Initial generation                   |
+   | 2     | 88.1%  | +15.8% | Fixed header bg color, card spacing  |
+   | 3     | 96.2%  | +8.1%  | Fixed font sizes, button padding     |
+   ```
+
+   **Table 3 — Build Efficiency**
+
+   Proxy metrics for what the build consumed and produced. Compute each value as follows:
+   - **Components Reused** — count of existing components from `design-tokens.json` that were imported/used in the generated code.
+   - **Components Created** — count of new component files created during the build.
+   - **Design Tokens Used** — count of distinct design token references (colors, spacing, typography, shadows, borders) used in the generated code. Count unique token keys referenced, not total occurrences.
+   - **Lines Generated** — total lines of code across all newly created files.
+   - **Audit Issues Fixed** — total count of issues fixed in Phase 4 (hardcoded values, a11y, library imports, conventions). 0 if audit was clean.
+
+   ```
+   | Metric              | Count |
+   |---------------------|-------|
+   | Components Reused   | 3     |
+   | Components Created  | 1     |
+   | Design Tokens Used  | 12    |
+   | Lines Generated     | 187   |
+   | Audit Issues Fixed  | 4     |
+   ```
+
+   **After the tables:** List all files created or modified with their full paths. If there are remaining known differences from the Figma design, note them with the diff image reference.
 3. **Auto-update design tokens if needed.** If new reusable components, hooks, or API patterns were created during this build:
    - Read the current `.claude/design-tokens/design-tokens.json`
    - Add new components to the `components` array (with name, path, description, props)
@@ -704,7 +746,12 @@ After the audit:
         "threshold_used": "<the THRESHOLD value used for this build>",
         "max_rounds_used": "<the MAX_ROUNDS value used for this build>",
         "score_progression": ["<array of match % scores from each round, e.g. [72.1, 85.4, 96.2]>"],
-        "plateau_detected": "<boolean — true if the last 2+ rounds had score changes < 0.5%>"
+        "plateau_detected": "<boolean — true if the last 2+ rounds had score changes < 0.5%>",
+        "components_reused": "<count of existing components reused>",
+        "components_created": "<count of new component files created>",
+        "design_tokens_used": "<count of distinct design token references in generated code>",
+        "lines_generated": "<total lines of code across all created files>",
+        "audit_issues_fixed": "<count of issues fixed in Phase 4>"
       }
       ```
    4. Push the new entry onto the array and write the file back.
