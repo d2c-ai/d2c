@@ -429,31 +429,23 @@ Split the monolithic file into focused files in `.claude/design-tokens/`:
 
 **On incremental updates:** When running an incremental update (pre-check detected existing file), if split files exist, regenerate only the split files whose source sections changed. For example, if only components changed, only rewrite `tokens-components.json`.
 
-## Step 7: Check Playwright and Pixelmatch
+## Step 7: Check Playwright, Pixelmatch, and Pngjs
 
-Ensure Playwright and pixelmatch are installed and ready for the visual verification workflow. Use a cascading install strategy with this **priority order: project deps > ~/.d2c-deps > global**.
-
-> **Dependency resolution priority:**
-> 1. **Project dependencies** — if the consuming project already has the package in `node_modules/` or `package.json` devDependencies, use it and skip installation entirely.
-> 2. **~/.d2c-deps local prefix** — install to the d2c-specific directory. This avoids permission issues and does not pollute the project or global namespace.
-> 3. **Global install** — fallback only if `~/.d2c-deps` fails (e.g., disk permissions).
+Ensure Playwright, pixelmatch, and pngjs are installed globally and ready for the visual verification workflow. These are installed **globally** so they work regardless of how d2c was installed (plugin, skills, manual) and across all projects.
 
 **Playwright:**
-1. **Check project first:** Look for `playwright` in `node_modules/.package-lock.json`, `package.json` devDependencies, or run `npx --no-install playwright --version`. If available, skip to Chromium check below.
-2. If not found in the project, try each approach in order (stop at first success):
-   a. `npm install --prefix ~/.d2c-deps playwright && ~/.d2c-deps/node_modules/.bin/playwright install chromium`
-   b. `npm install -g playwright && npx playwright install chromium`
-3. **Chromium check:** Regardless of where Playwright was found, ensure Chromium is installed: run `npx playwright install chromium` (or `~/.d2c-deps/node_modules/.bin/playwright install chromium` if installed at `~/.d2c-deps`).
-4. If all approaches fail, warn the user: "Could not install Playwright. Install it manually with `npm install -g playwright && npx playwright install chromium`. Visual verification will be unavailable until then." Do not block — continue with init.
+1. **Check if already available:** Run `npx --no-install playwright --version 2>/dev/null` or check if `playwright` exists in the project's `node_modules/` or `package.json` devDependencies. If available, skip to Chromium check below.
+2. If not found, install globally: `npm install -g playwright && npx playwright install chromium`
+3. **Chromium check:** Regardless of where Playwright was found, ensure Chromium is installed: run `npx playwright install chromium`.
+4. If install fails, warn the user: "Could not install Playwright. Install it manually with `npm install -g playwright && npx playwright install chromium`. Visual verification will be unavailable until then." Do not block — continue with init.
 
-**Pixeldiff dependencies (for objective visual scoring):**
-1. **Check project first:** Look for `pixelmatch` and `pngjs` in the project's `node_modules/` (check `node_modules/pixelmatch` exists) and `package.json` devDependencies. If both are found, skip installation. Run `node -e "require('pixelmatch'); require('pngjs'); console.log('pixeldiff ready')"` to verify they resolve.
-2. If not found in the project, try each approach in order (stop at first success):
-   a. `npm install --prefix ~/.d2c-deps pixelmatch pngjs`
-   b. `npm install -g pixelmatch pngjs`
-3. If `~/.d2c-deps` was used (either for Playwright or pixeldiff), note in the verification summary: "Dependencies installed at `~/.d2c-deps`. The build skill will use `NODE_PATH=~/.d2c-deps/node_modules` when running pixeldiff.js. Add `export NODE_PATH=~/.d2c-deps/node_modules:$NODE_PATH` to your shell profile for persistence, or add `~/.d2c-deps/node_modules/.bin` to your PATH."
-4. If all approaches fail, warn the user: "Could not install pixelmatch/pngjs. Pixel-diff scoring will be unavailable — builds will use visual-only comparison." Do not block.
-5. If already installed (in project or previously at `~/.d2c-deps` or globally), skip.
+**Pixelmatch and pngjs (for objective visual scoring):**
+1. **Check if already available globally:** Run `node -e "require('pixelmatch'); require('pngjs'); console.log('pixeldiff ready')"`. If this succeeds, skip installation.
+2. If not found globally, check the project's `node_modules/` — look for `node_modules/pixelmatch` and `node_modules/pngjs`. If both exist, skip.
+3. If not found anywhere, install globally: `npm install -g pixelmatch pngjs`
+4. **Verify after install:** Run `node -e "require('pixelmatch'); require('pngjs'); console.log('pixeldiff ready')"` to confirm they resolve.
+5. If install fails, warn the user: "Could not install pixelmatch/pngjs. Pixel-diff scoring will be unavailable — builds will use visual-only comparison." Do not block.
+6. If already installed, skip.
 
 ## Step 8: Verify and Confirm
 

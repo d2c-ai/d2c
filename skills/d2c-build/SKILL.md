@@ -453,7 +453,18 @@ Do NOT retry any failing tool more than once. If a tool fails twice, report the 
 
 **Step A: Objective pixel-diff score.**
 
-Run a pixel-diff comparison between the Figma screenshot and the Playwright screenshot using the pixeldiff script (shipped with this skill at `scripts/pixeldiff.js`, dependencies installed during `/d2c-init`).
+Run a pixel-diff comparison between the Figma screenshot and the Playwright screenshot using the pixeldiff script (dependencies installed during `/d2c-init`).
+
+**Locating pixeldiff.js:** The script ships with this skill. Resolve it by checking these locations in order (first match wins):
+
+1. **Relative to this skill file:** `scripts/pixeldiff.js` (works for project-level installs and plugin installs)
+2. **Global skills directory:** `~/.claude/skills/d2c-build/scripts/pixeldiff.js`
+3. **Agent Skills directory:** `~/.agents/skills/d2c-build/scripts/pixeldiff.js`
+4. **Global commands directory:** `~/.claude/commands/d2c-build/scripts/pixeldiff.js`
+5. **~/.d2c-deps cache:** `~/.d2c-deps/pixeldiff.js`
+6. **Glob fallback:** Search with `**/pixeldiff.js` across `~/.claude/`, `~/.agents/`, and the project root.
+
+Store the resolved path in a variable (e.g., `PIXELDIFF_SCRIPT`) and reuse it for all rounds.
 
 **A.1 — Capture the Figma design screenshot**
 
@@ -471,10 +482,10 @@ The Playwright screenshot is already at `$D2C_TMP/d2c-screenshot.png`.
 **Step A.2: Run the pixelmatch CLI.**
 
 ```bash
-node skills/d2c-build/scripts/pixeldiff.js $D2C_TMP/figma-screenshot.png $D2C_TMP/d2c-screenshot.png $D2C_TMP/figma-diff.png 0.1
+node $PIXELDIFF_SCRIPT $D2C_TMP/figma-screenshot.png $D2C_TMP/d2c-screenshot.png $D2C_TMP/figma-diff.png 0.1
 ```
 
-If the script is not found at `skills/d2c-build/scripts/pixeldiff.js`, search for it with Glob: `**/pixeldiff.js`.
+`$PIXELDIFF_SCRIPT` is the path resolved in the "Locating pixeldiff.js" step above.
 
 Arguments:
 - Image 1: `$D2C_TMP/figma-screenshot.png` (Figma)
@@ -501,11 +512,12 @@ Parse the output:
 **Note on cross-renderer differences:** Figma's renderer and Chromium produce inherently different anti-aliasing, font rendering, and sub-pixel positioning. A pixel-diff score above 90% is considered good for cross-renderer comparison. The threshold parameter (0.1) already provides tolerance for anti-aliasing. If scores consistently plateau below 95% due to renderer differences (not actual layout/color issues), visual judgment in Step B should confirm correctness and the loop may stop early.
 
 **Step A.4: If the script fails:**
-1. If dependencies are missing, try each approach in order (stop at first success):
+1. **If pixeldiff.js was not found** at any location: warn the user: "pixeldiff.js not found. Reinstall d2c with `npx skills add d2c-ai/d2c` or `/plugin install d2c`." Fall back to visual-only comparison (Step B only).
+2. **If dependencies are missing** (e.g., `Cannot find module 'pixelmatch'` or `Cannot find module 'pngjs'`), try each approach in order (stop at first success):
    a. `npm install -g pixelmatch pngjs`
-   b. `npm install --prefix ~/.d2c-deps pixelmatch pngjs` — then retry with `NODE_PATH=~/.d2c-deps/node_modules node <pixeldiff.js path> ...`
-2. Retry the script once after installing.
-3. If it still fails, warn the user: "Pixel-diff scoring unavailable — falling back to visual-only comparison." Proceed with Step B only.
+   b. `npm install --prefix ~/.d2c-deps pixelmatch pngjs` — then retry with `NODE_PATH=~/.d2c-deps/node_modules node $PIXELDIFF_SCRIPT ...`
+3. Retry the script once after installing.
+4. If it still fails, warn the user: "Pixel-diff scoring unavailable — falling back to visual-only comparison." Proceed with Step B only.
 
 **Step B: Visual judgment comparison.**
 

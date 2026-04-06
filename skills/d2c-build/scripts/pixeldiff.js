@@ -17,8 +17,26 @@
  */
 
 const fs = require("fs");
-const { PNG } = require("pngjs");
-const pixelmatch = require("pixelmatch");
+const { execSync } = require("child_process");
+
+/**
+ * Resolve a module, falling back to the global node_modules directory.
+ * Node's require() doesn't search global node_modules by default,
+ * so when pixeldiff.js runs from ~/.claude/skills/ or ~/.agents/skills/,
+ * globally-installed packages won't be found without this.
+ */
+function requireGlobal(name) {
+  try {
+    return require(name);
+  } catch {
+    // Get the global node_modules path and try from there
+    const globalRoot = execSync("npm root -g", { encoding: "utf-8" }).trim();
+    return require(require("path").join(globalRoot, name));
+  }
+}
+
+const { PNG } = requireGlobal("pngjs");
+const pixelmatch = requireGlobal("pixelmatch");
 
 const args = process.argv.slice(2);
 
