@@ -25,7 +25,11 @@ Store these as `THRESHOLD` and `MAX_ROUNDS` variables for use in Phase 3. If the
 
 Before anything else:
 1. Check that `.claude/design-tokens/design-tokens.json` exists. If it doesn't, tell the user to run `/d2c-init` first and stop.
-2. **Schema validation:** Validate `.claude/design-tokens/design-tokens.json` against the JSON Schema at `references/design-tokens.schema.json` (relative to this SKILL.md, or search with Glob for `**/design-tokens.schema.json`). If validation fails, warn the user with the specific validation errors and ask: "design-tokens.json has schema errors. Run `/d2c-init --force` to regenerate, or continue anyway?" If the schema file is not found, skip validation silently.
+2. **Schema validation:** Validate `.claude/design-tokens/design-tokens.json` against the JSON Schema. Try these locations in order (first found wins):
+   - `references/design-tokens.schema.json` (relative to this SKILL.md file)
+   - Search with Glob for `**/design-tokens.schema.json` in `.claude/`, `.agents/`, and the skill install directories
+
+   If validation fails, warn the user with the specific validation errors and ask: "design-tokens.json has schema errors. Run `/d2c-init --force` to regenerate, or continue anyway?" If the schema file is not found, skip validation silently.
 3. **Schema version check:** Read the `d2c_schema_version` field. If it is missing or less than 1 (the current version), warn the user: "design-tokens.json uses schema version {version or 'none'} but the current version is 1. Run `/d2c-init --force` to regenerate." Allow the user to continue or abort.
 4. **Load design tokens using the phased loading strategy below.** Do NOT read the entire file into context at once — load only the sections needed for the current phase.
 
@@ -89,7 +93,7 @@ Always display the one-line estimate so users know the context cost. Proceed wit
 1. Read the `framework` field from `.claude/design-tokens/design-tokens.json`.
 2. Read the framework reference file. Try these locations in order (first found wins):
    - `references/framework-{framework}.md` (relative to this SKILL.md file — co-located in the `references/` subdirectory)
-   - Search with Glob for `**/framework-{framework}.md` in the skill install directories
+   - Search with Glob for `**/framework-{framework}.md` in `.claude/`, `.agents/`, and the skill install directories
    - If neither resolves, proceed without a reference file (step 4 applies).
 3. All code generation in Phase 2 MUST follow both the universal rules in this SKILL.md AND the framework-specific rules in the loaded reference file. The reference file takes precedence for framework-specific syntax (file extensions, class vs className, props syntax, etc.).
 4. If the reference file does not exist, default to React/Next.js conventions (see inline fallback rules in Generation Rules section) and warn the user: "No framework reference file found for {framework}. Generating with React/Next.js defaults. Run /d2c-init to detect your framework."

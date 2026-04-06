@@ -165,7 +165,11 @@ This step scans `package.json` to find all installed libraries, groups them by c
 
 Read `package.json` → `dependencies` and `devDependencies`. For every installed package, check if it belongs to a known capability category. A library belongs to a category if its package name matches.
 
-Read `references/library-categories.md` for the full table of known library categories and their members. For each installed package, check if it belongs to a known category. Framework-specific categories (prefixed with vue_, svelte_, angular_, solid_) only apply if the detected framework matches.
+Read the library categories reference file. Try these locations in order (first found wins):
+- `references/library-categories.md` (relative to this SKILL.md file)
+- Search with Glob for `**/library-categories.md` in `.claude/`, `.agents/`, and the skill install directories
+
+For each installed package, check if it belongs to a known category. Framework-specific categories (prefixed with vue_, svelte_, angular_, solid_) only apply if the detected framework matches.
 
 ### Step 5b: Also detect `fetch` usage
 
@@ -391,11 +395,19 @@ Wait for the user's response. If they override a value, set `"override": true` f
 
 ## Step 6: Generate design-tokens.json
 
-Read `references/token-schema.md` for the complete JSON schema and preferred_libraries format. Write the file to `.claude/design-tokens/design-tokens.json`. Create the `.claude/design-tokens/` directory if it does not exist. Follow the schema exactly.
+Read the token schema reference file. Try these locations in order (first found wins):
+- `references/token-schema.md` (relative to this SKILL.md file)
+- Search with Glob for `**/token-schema.md` in `.claude/`, `.agents/`, and the skill install directories
+
+Write the file to `.claude/design-tokens/design-tokens.json`. Create the `.claude/design-tokens/` directory if it does not exist. Follow the schema exactly.
 
 **Schema version:** Always write `"d2c_schema_version": 1` as the FIRST field in the JSON file. This is required for forward compatibility — the build and audit skills check this version before reading.
 
-**Schema validation:** Before writing the file, validate the generated JSON against the JSON Schema at `references/design-tokens.schema.json`. If validation fails, fix the generated JSON to conform to the schema before writing. If the schema file is not found, proceed without validation but warn: "Schema validation skipped — design-tokens.schema.json not found."
+**Schema validation:** Before writing the file, validate the generated JSON against the JSON Schema. Try these locations in order (first found wins):
+- `references/design-tokens.schema.json` (relative to this SKILL.md file)
+- Search with Glob for `**/design-tokens.schema.json` in `.claude/`, `.agents/`, and the skill install directories
+
+If validation fails, fix the generated JSON to conform to the schema before writing. If the schema file is not found, proceed without validation but warn: "Schema validation skipped — design-tokens.schema.json not found."
 
 If no libraries are detected in any category, omit the `preferred_libraries` section. If no data fetching library exists, omit the `api` section. Include the `conventions` section from Step 5h — omit conventions that don't apply to the detected framework (see Step 5h for applicability rules).
 
