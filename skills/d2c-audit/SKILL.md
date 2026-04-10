@@ -13,7 +13,7 @@ You are auditing this project's codebase to find violations of the design system
 
 These rules hold across every phase of this skill. No exceptions.
 
-1. **Design tokens MUST be loaded before any decision.** Read `.claude/design-tokens/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
+1. **Design tokens MUST be loaded before any decision.** Read `.claude/d2c/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
 2. **NEVER use a library outside `preferred_libraries.<category>.selected`.** The user explicitly chose which library to use for each capability. NEVER substitute an installed-but-not-selected library. If the design requires a capability not covered by `preferred_libraries`, STOP AND ASK.
 3. **NEVER hardcode color, spacing, typography, shadow, or radius values.** Every visual value MUST reference a design token from `design-tokens.json`. No raw hex, no magic numbers, no exceptions.
 4. **MUST reuse existing components when an existing component can serve the need.** Check the `components` array in `design-tokens.json` before creating anything new. If an existing component can do the job, MUST use it.
@@ -53,9 +53,9 @@ Parse `$ARGUMENTS` for optional flags:
 
 ## Pre-flight Check
 
-1. Check that `.claude/design-tokens/design-tokens.json` exists. If it doesn't, tell the user to run `/d2c-init` first and stop.
+1. Check that `.claude/d2c/design-tokens.json` exists. If it doesn't, tell the user to run `/d2c-init` first and stop.
 2. **Schema version check:** Read the `d2c_schema_version` field. If it is missing or less than 1 (the current version), STOP AND ASK the user: "design-tokens.json uses schema version {version or 'none'} but the current version is 1. You MUST run `/d2c-init --force` to regenerate before this audit can produce reliable results. Continue with the outdated schema anyway, or abort?" NEVER proceed past this check without an explicit user decision.
-3. Read `.claude/design-tokens/design-tokens.json` fully into context.
+3. Read `.claude/d2c/design-tokens.json` fully into context.
 
 **Split file support:** After reading `design-tokens.json`, check the `split_files` field. If `true`, load only the split files relevant to each audit instead of keeping the full file in context:
 
@@ -199,7 +199,7 @@ Search for `<input`, `<select`, `<textarea` that are not preceded by a `<label` 
 
 ## Audit 6: Token Conflict Violations
 
-If `.claude/design-tokens/token-conflicts.json` exists and contains resolved conflicts (status `auto-resolved` or `user-resolved`), scan source files for references to non-canonical (duplicate) token names.
+If `.claude/d2c/token-conflicts.json` exists and contains resolved conflicts (status `auto-resolved` or `user-resolved`), scan source files for references to non-canonical (duplicate) token names.
 
 For each resolved conflict entry, extract the `duplicates` array (these are the non-canonical token names). For each duplicate token name, search for its usage in source files:
 

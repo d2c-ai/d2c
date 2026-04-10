@@ -643,7 +643,7 @@ function resolveLatestPointer(pointerPath) {
 
 function resolveRunDir(rawRunDir) {
   if (rawRunDir === "latest") {
-    const pointer = path.join(".claude", "design-tokens", "runs", "latest");
+    const pointer = path.join(".claude", "d2c", "runs", "latest");
     if (!fs.existsSync(pointer)) return null;
     try {
       return resolveLatestPointer(pointer);
@@ -677,7 +677,7 @@ function main(argv = process.argv.slice(2)) {
   }
 
   const tokensPath =
-    rawTokensPath || path.join(".claude", "design-tokens", "design-tokens.json");
+    rawTokensPath || path.join(".claude", "d2c", "design-tokens.json");
 
   const schemasDir = locateSchemasDir();
   if (!schemasDir) {

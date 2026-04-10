@@ -24,8 +24,8 @@ Store these as `THRESHOLD` and `MAX_ROUNDS` variables for use in Phase 4. If the
 ## Pre-flight Check
 
 Before anything else:
-1. Check that `.claude/design-tokens/design-tokens.json` exists. If it doesn't, **automatically run `/d2c-init`** to scan the codebase and generate tokens. Wait for `d2c-init` to complete successfully before continuing with step 2. If `d2c-init` fails, stop and surface the error — do not proceed with the build.
-2. **Schema validation:** Validate `.claude/design-tokens/design-tokens.json` against the JSON Schema. Try these locations in order (first found wins):
+1. Check that `.claude/d2c/design-tokens.json` exists. If it doesn't, **automatically run `/d2c-init`** to scan the codebase and generate tokens. Wait for `d2c-init` to complete successfully before continuing with step 2. If `d2c-init` fails, stop and surface the error — do not proceed with the build.
+2. **Schema validation:** Validate `.claude/d2c/design-tokens.json` against the JSON Schema. Try these locations in order (first found wins):
    - `references/design-tokens.schema.json` (relative to this SKILL.md file)
    - Search with Glob for `**/design-tokens.schema.json` in `.claude/`, `.agents/`, and the skill install directories
 
@@ -65,7 +65,7 @@ Each split file is a standalone JSON object — read it directly with `Read`, no
 After the Pre-flight check, estimate the context cost for this build to warn users about large projects that may hit context limits.
 
 **Estimation steps:**
-1. Read `.claude/design-tokens/design-tokens.json` and count its lines and character length. Estimate tokens as `Math.ceil(characters / 4)`.
+1. Read `.claude/d2c/design-tokens.json` and count its lines and character length. Estimate tokens as `Math.ceil(characters / 4)`.
 2. Check if `split_files` is `true` in design-tokens.json. If split files exist, the per-phase cost is lower — note this in the estimate.
 3. Read the framework reference file (`references/framework-{framework}.md`) and estimate its tokens the same way.
 4. Add a fixed estimate of **3,000 tokens** for Figma context overhead (screenshots, design metadata).
@@ -93,7 +93,7 @@ Always display the one-line estimate so users know the context cost. Proceed wit
 
 ## Step 0: Load Framework Rules
 
-1. Read the `framework` field from `.claude/design-tokens/design-tokens.json`.
+1. Read the `framework` field from `.claude/d2c/design-tokens.json`.
 2. Read the framework reference file. Try these locations in order (first found wins):
    - `references/framework-{framework}.md` (relative to this SKILL.md file — co-located in the `references/` subdirectory)
    - Search with Glob for `**/framework-{framework}.md` in `.claude/`, `.agents/`, and the skill install directories
@@ -119,7 +119,7 @@ Always display the one-line estimate so users know the context cost. Proceed wit
 
 These rules hold across every phase of this skill. No exceptions.
 
-1. **Design tokens MUST be loaded before any decision.** Read `.claude/design-tokens/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
+1. **Design tokens MUST be loaded before any decision.** Read `.claude/d2c/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
 2. **NEVER use a library outside `preferred_libraries.<category>.selected`.** The user explicitly chose which library to use for each capability. NEVER substitute an installed-but-not-selected library. If the design requires a capability not covered by `preferred_libraries`, STOP AND ASK.
 3. **NEVER hardcode color, spacing, typography, shadow, or radius values.** Every visual value MUST reference a design token from `design-tokens.json`. No raw hex, no magic numbers, no exceptions.
 4. **MUST reuse existing components when an existing component can serve the need.** Check the `components` array in `design-tokens.json` before creating anything new. If an existing component can do the job, MUST use it.
@@ -148,7 +148,7 @@ Ask the user for the Figma Dev Mode URL for the design. This is required.
 If the user provided a URL with their initial prompt (e.g., `/d2c:build https://www.figma.com/design/...`), use that — captured in $ARGUMENTS.
 
 ### 1.1b — Dry Run Check
-If the user includes "dry run" in their prompt or $ARGUMENTS, complete Phases 1 and 2 but **halt before Phase 3 (Generate Code)**. Phase 2 writes the four IR artifacts to `.claude/design-tokens/runs/<timestamp>/` and runs `validate-ir.js`; the IR **is** the plan. After validate-ir prints `ok`, present the plan to the user: which files would be created/modified, which existing components would be reused, and a pointer to the IR directory so they can inspect the raw JSON before proceeding. Ask the user to confirm before moving to Phase 3 and running the verification loop. (Note: `--dry-run` means "emit and validate IR, halt before codegen" — it does not mean "skip all writes". The IR JSON files are always written so the plan is inspectable.)
+If the user includes "dry run" in their prompt or $ARGUMENTS, complete Phases 1 and 2 but **halt before Phase 3 (Generate Code)**. Phase 2 writes the four IR artifacts to `.claude/d2c/runs/<timestamp>/` and runs `validate-ir.js`; the IR **is** the plan. After validate-ir prints `ok`, present the plan to the user: which files would be created/modified, which existing components would be reused, and a pointer to the IR directory so they can inspect the raw JSON before proceeding. Ask the user to confirm before moving to Phase 3 and running the verification loop. (Note: `--dry-run` means "emit and validate IR, halt before codegen" — it does not mean "skip all writes". The IR JSON files are always written so the plan is inspectable.)
 
 ### 1.2 — Standard Intake Questions
 
@@ -180,7 +180,7 @@ If the user disagrees with the classification, they can override by answering th
 
 Ask the applicable questions in a single message. If the user already answered any of these in their prompt or $ARGUMENTS, pre-fill those and only ask the remaining ones.
 
-**Intake history:** Before asking, check if `.claude/design-tokens/intake-history.json` exists. If it does, read it. The file contains a `builds` array (newest first, max 5 entries). First, check if any entry's `figma_url` matches the current Figma URL — if so, use that entry's answers as defaults. If no URL match, use the first (most recent) entry. For each question below, if there is a previous answer on record, show it as a selectable option labeled **"Last used: [previous answer]"** alongside the standard choices. The user must explicitly select it — never auto-apply previous answers. Always also show the standard options so the user can pick something different.
+**Intake history:** Before asking, check if `.claude/d2c/intake-history.json` exists. If it does, read it. The file contains a `builds` array (newest first, max 5 entries). First, check if any entry's `figma_url` matches the current Figma URL — if so, use that entry's answers as defaults. If no URL match, use the first (most recent) entry. For each question below, if there is a previous answer on record, show it as a selectable option labeled **"Last used: [previous answer]"** alongside the standard choices. The user must explicitly select it — never auto-apply previous answers. Always also show the standard options so the user can pick something different.
 
 **Questions (ask all that apply based on complexity classification):**
 
@@ -206,7 +206,7 @@ Ask the applicable questions in a single message. If the user already answered a
 
 Wait for answers before proceeding. Do not assume defaults for any unanswered question (except the auto-filled ones from complexity classification).
 
-**After receiving answers:** Save the answers to `.claude/design-tokens/intake-history.json`. The file contains a `builds` array (max 5 entries, newest first). Prepend the new entry. If an entry with the same `figma_url` already exists, replace it instead of prepending. If the array exceeds 5 entries, drop the oldest. Structure:
+**After receiving answers:** Save the answers to `.claude/d2c/intake-history.json`. The file contains a `builds` array (max 5 entries, newest first). Prepend the new entry. If an entry with the same `figma_url` already exists, replace it instead of prepending. If the array exceeds 5 entries, drop the oldest. Structure:
 
 ```json
 {
@@ -283,20 +283,20 @@ Examples:
 >
 > Which would you like?"
 
-Always recommend the option that best fits the project's existing stack and complexity. Wait for the user's choice before proceeding. Install the chosen library before generating code. **After the user chooses, update `preferred_libraries` in `.claude/design-tokens/design-tokens.json`** with the new category and selection so future builds don't ask again.
+Always recommend the option that best fits the project's existing stack and complexity. Wait for the user's choice before proceeding. Install the chosen library before generating code. **After the user chooses, update `preferred_libraries` in `.claude/d2c/design-tokens.json`** with the new category and selection so future builds don't ask again.
 
 ---
 
 ## Phase 2: Emit and Validate Intermediate Representation
 
-IR is the **plan** for the build. Before any code is written, Phase 2 produces four JSON artifacts in `.claude/design-tokens/runs/<timestamp>/` and runs `scripts/validate-ir.js` to verify them. Code generation in Phase 3 reads the validated IR as a **frozen** input — Non-negotiable rule 6 forbids re-deciding any IR value during codegen or retry.
+IR is the **plan** for the build. Before any code is written, Phase 2 produces four JSON artifacts in `.claude/d2c/runs/<timestamp>/` and runs `scripts/validate-ir.js` to verify them. Code generation in Phase 3 reads the validated IR as a **frozen** input — Non-negotiable rule 6 forbids re-deciding any IR value during codegen or retry.
 
 Three of the four artifacts are **authored** (the model decides their contents). The fourth (`run-manifest.json`) is **mechanical** bookkeeping written by this phase itself.
 
 **Version coupling rule:** All four IR artifacts (`run-manifest.json`, `component-match.json`, `token-map.json`, `layout.json`) MUST share the same `schema_version` value. Set `schema_version` to **1** for all artifacts unless explicitly instructed otherwise. If you use v2 for component-match (scored candidates), you MUST also set v2 for run-manifest, token-map, and layout. The validator rejects any version mismatch across artifacts.
 
 **Phase 2 Quick Reference:**
-- **2.0** Create run directory: `.claude/design-tokens/runs/<YYYY-MM-DDTHHMMSS>/`
+- **2.0** Create run directory: `.claude/d2c/runs/<YYYY-MM-DDTHHMMSS>/`
 - **2.1** `run-manifest.json`: compute SHA-256 hash of `design-tokens.json` (or concatenated split files in order: `tokens-core | tokens-colors | tokens-components | tokens-conventions`)
 - **2.2** `component-match.json`: score candidates per node, pick highest
 - **2.3** `token-map.json`: map Figma properties to `<category>.<name>` token paths (must resolve to leaf values in design-tokens.json)
@@ -308,14 +308,14 @@ Three of the four artifacts are **authored** (the model decides their contents).
 Compute a timestamp in the format `YYYY-MM-DDTHHMMSS` (no colons, filesystem-safe on Windows). Create the directory:
 
 ```
-.claude/design-tokens/runs/<YYYY-MM-DDTHHMMSS>/
+.claude/d2c/runs/<YYYY-MM-DDTHHMMSS>/
 ```
 
-Also update `.claude/design-tokens/runs/latest` to point at this new directory. On POSIX, create a symlink; on Windows (or if symlinks fail), write a plain text file containing the run-dir path. Store the full run directory path as `ir_run_dir` for use in step 2f and in the checkpoint file.
+Also update `.claude/d2c/runs/latest` to point at this new directory. On POSIX, create a symlink; on Windows (or if symlinks fail), write a plain text file containing the run-dir path. Store the full run directory path as `ir_run_dir` for use in step 2f and in the checkpoint file.
 
 ### 2.1 — Emit `run-manifest.json` (mechanical)
 
-Compute the SHA-256 hex digest of `.claude/design-tokens/design-tokens.json` (raw file bytes). If `split_files: true`, instead hash the four split files concatenated in the fixed order `tokens-core.json | tokens-colors.json | tokens-components.json | tokens-conventions.json`.
+Compute the SHA-256 hex digest of `.claude/d2c/design-tokens.json` (raw file bytes). If `split_files: true`, instead hash the four split files concatenated in the fixed order `tokens-core.json | tokens-colors.json | tokens-components.json | tokens-conventions.json`.
 
 Write `<ir_run_dir>/run-manifest.json`:
 
@@ -454,7 +454,7 @@ How well the component's `name` and `description` match the Figma node's name, t
 
 ### 2.3 — Emit `token-map.json` (authored)
 
-**Conflict-aware preamble:** Before emitting token-map.json, read `.claude/design-tokens/token-conflicts.json` if it exists. If any conflict entry has `status: "unresolved"`, trigger **P2-TOKEN-CONFLICT-ASK** — STOP AND ASK the user to resolve before proceeding with token mapping. Do not emit token-map.json while unresolved conflicts exist.
+**Conflict-aware preamble:** Before emitting token-map.json, read `.claude/d2c/token-conflicts.json` if it exists. If any conflict entry has `status: "unresolved"`, trigger **P2-TOKEN-CONFLICT-ASK** — STOP AND ASK the user to resolve before proceeding with token mapping. Do not emit token-map.json while unresolved conflicts exist.
 
 For every Figma node with design properties that would normally be translated to CSS values, map each property to a dotted token reference against `design-tokens.json`:
 
@@ -518,7 +518,7 @@ Rules:
 Invoke the validator on the run directory. Resolve the script path with the same cascade as `pixeldiff.js`: try `references/scripts/validate-ir.js` relative to this SKILL.md, then `~/.claude/commands/d2c-build/scripts/validate-ir.js`, then `~/.claude/skills/d2c-build/scripts/validate-ir.js`, then `~/.agents/skills/d2c-build/scripts/validate-ir.js`, then Glob `**/validate-ir.js` as a last resort.
 
 ```bash
-node "$VALIDATE_IR_SCRIPT" ".claude/design-tokens/runs/<timestamp>/"
+node "$VALIDATE_IR_SCRIPT" ".claude/d2c/runs/<timestamp>/"
 ```
 
 Parse stdout. The first line is `validate-ir: ok | fail | skip`. On `ok`, proceed to step 2f. On `fail`, read the subsequent `error: …` lines and enter the failure handling below.
@@ -583,11 +583,11 @@ The lock file uses the `decisions-lock.schema.json` schema. If `validate-ir.js` 
 
 ### 2.7 — Record `ir_run_dir` in the checkpoint
 
-On success, append `ir_run_dir: "<full path to run dir>"` to `.claude/design-tokens/.d2c-build-checkpoint.json` so a later resume can re-read the same IR instead of regenerating it. Proceed to Phase 3.
+On success, append `ir_run_dir: "<full path to run dir>"` to `.claude/d2c/.d2c-build-checkpoint.json` so a later resume can re-read the same IR instead of regenerating it. Proceed to Phase 3.
 
 ### 2.8 — Dry-run halt
 
-If the user passed `dry run` in $ARGUMENTS (see Phase 1.1b), halt here after step 2.7. Do not proceed to Phase 3. Print a summary of the IR contents (node count, token-ref count, deferred count) and the path to `.claude/design-tokens/runs/<timestamp>/` so the user can inspect the JSON before deciding to continue.
+If the user passed `dry run` in $ARGUMENTS (see Phase 1.1b), halt here after step 2.7. Do not proceed to Phase 3. Print a summary of the IR contents (node count, token-ref count, deferred count) and the path to `.claude/d2c/runs/<timestamp>/` so the user can inspect the JSON before deciding to continue.
 
 ---
 
@@ -756,7 +756,7 @@ Before the first round, check for a previous interrupted build and create/restor
 
 **Step 4.0a — Check for checkpoint.**
 
-Check if `.claude/design-tokens/.d2c-build-checkpoint.json` exists. If it does, read it and check if its `figma_url` matches the current build's Figma URL.
+Check if `.claude/d2c/.d2c-build-checkpoint.json` exists. If it does, read it and check if its `figma_url` matches the current build's Figma URL.
 
 - **If checkpoint exists AND `figma_url` matches:** Ask the user: "A previous build was interrupted at **round {round}** with score **{score}%**. Resume from where it left off, or start fresh?"
   - **Resume:** Load the checkpoint state. Restore `D2C_TMP` to the saved `session_dir` (verify it still exists on disk — if not, fall back to start fresh). Set the current round counter to `checkpoint.round + 1`. Set `THRESHOLD` and `MAX_ROUNDS` from the checkpoint (unless the user overrode them via arguments — user arguments take precedence). **Verify `decisions.lock.json` exists in `ir_run_dir`.** If the lock file is missing (user deleted it or file is corrupt), treat as all nodes unlocked — re-run Phase 2 for all nodes and write a fresh lock before continuing. If the lock file exists, read it and proceed. Skip directly to Phase 4.1 (take a new screenshot and continue the verification loop).
@@ -774,7 +774,7 @@ All screenshots and diff images for this session go into `$D2C_TMP/`. This preve
 
 **Step 4.0c — Save checkpoint after each round.**
 
-At the END of each verification round (after scoring in 4.2), save checkpoint state to `.claude/design-tokens/.d2c-build-checkpoint.json`:
+At the END of each verification round (after scoring in 4.2), save checkpoint state to `.claude/d2c/.d2c-build-checkpoint.json`:
 
 ```json
 {
@@ -784,7 +784,7 @@ At the END of each verification round (after scoring in 4.2), save checkpoint st
   "score": 88.1,
   "files_touched": ["src/components/Header.tsx", "src/app/dashboard/page.tsx"],
   "session_dir": "/tmp/d2c-XXXXXX",
-  "ir_run_dir": ".claude/design-tokens/runs/2026-04-10T100000",
+  "ir_run_dir": ".claude/d2c/runs/2026-04-10T100000",
   "threshold": 95,
   "max_rounds": 4,
   "node_file_map": {
@@ -1031,7 +1031,7 @@ Round 1 has no snapshot (there is no prior state to revert to — the files were
 
 Use the gating score from Step C (pixel-diff `100 - error%` if available, otherwise visual judgment):
 
-- **Below `THRESHOLD`%** (default 95): Apply the fixes identified in Step 4.3b, starting with the highest red-pixel-density issues. MUST respect the file scope from Step 4.3c — only edit files that are in scope for this round. Make **targeted edits** to code files only — NEVER modify any file under `.claude/design-tokens/runs/<timestamp>/` except `decisions.lock.json` (to mark failed nodes). The IR is frozen for the entire retry loop (Non-negotiable rule 6). If a fix would require changing a component choice, a token reference, or a layout direction recorded in the IR, read `decisions.lock.json` and check the node's status:
+- **Below `THRESHOLD`%** (default 95): Apply the fixes identified in Step 4.3b, starting with the highest red-pixel-density issues. MUST respect the file scope from Step 4.3c — only edit files that are in scope for this round. Make **targeted edits** to code files only — NEVER modify any file under `.claude/d2c/runs/<timestamp>/` except `decisions.lock.json` (to mark failed nodes). The IR is frozen for the entire retry loop (Non-negotiable rule 6). If a fix would require changing a component choice, a token reference, or a layout direction recorded in the IR, read `decisions.lock.json` and check the node's status:
   <!-- fm:P4-IR-LOCK-CONFLICT -->
   - If `status: "locked"`: Follow P4-IR-LOCK-CONFLICT in `references/failure-modes.md`. STOP AND ASK the user: "Node {nodeId} ({figma_name}, component: {componentId}) needs a different [component/token]. Unlock this node for re-decision?" If approved, update `decisions.lock.json`: set the node's `status` to `"failed"`, add `failure_reason` (describe what Phase 4 found), `failed_at` (current timestamp), and `failed_by: "phase4_pixeldiff"`. Then regenerate the IR for all nodes and write a fresh lock before continuing the loop.
   - If `status: "failed"`: The node has already been unlocked — proceed with the fix using the updated IR.
@@ -1203,7 +1203,7 @@ Follow PX-CASCADE in `references/failure-modes.md` — STOP AND ASK with options
 
 After the audit:
 
-0. **Delete the checkpoint file.** Remove `.claude/design-tokens/.d2c-build-checkpoint.json` if it exists. The build completed successfully — no resume needed.
+0. **Delete the checkpoint file.** Remove `.claude/d2c/.d2c-build-checkpoint.json` if it exists. The build completed successfully — no resume needed.
 1. Ensure all new components are properly exported and TypeScript types are correct.
 2. **Display the Build Report.** Output the following 3 tables as the build summary. Use the exact table formats below, filling in actual values from this build.
 
@@ -1270,7 +1270,7 @@ After the audit:
    | Token refs       | 42                                                 |
    | Deferred regions | 0                                                  |
    | Validator status | ok                                                 |
-   | Run dir          | .claude/design-tokens/runs/2026-04-10T100000       |
+   | Run dir          | .claude/d2c/runs/2026-04-10T100000       |
    ```
 
    **Table 5 — Decision Lock Summary**
@@ -1287,7 +1287,7 @@ After the audit:
    | Nodes locked       | 16                                                           |
    | Nodes failed       | 1                                                            |
    | Nodes re-decided   | 1                                                            |
-   | Lock file          | .claude/design-tokens/runs/2026-04-10T100000/decisions.lock.json |
+   | Lock file          | .claude/d2c/runs/2026-04-10T100000/decisions.lock.json |
    ```
 
    **After the tables:** List all files created or modified with their full paths. If there are remaining known differences from the Figma design, note them with the diff image reference.
@@ -1298,16 +1298,16 @@ After the audit:
    **Pre-write check:** Before modifying `design-tokens.json`, compute its current SHA-256 hash and compare against `run-manifest.json.tokens_file_hash`. If they differ, the file was modified during this build — follow P6-TOKENS-WRITE-CONFLICT in `references/failure-modes.md` (skip auto-update, report what would have been added).
 
    If hashes match, proceed:
-   - Read the current `.claude/design-tokens/design-tokens.json`
+   - Read the current `.claude/d2c/design-tokens.json`
    - Add new components to the `components` array (with name, path, description, props)
    - Add new hooks to the `hooks` array (with name, path, description)
    - Update the `api` section if new API patterns were introduced
    - Write the updated file back
-   - Tell the user: **"Updated `.claude/design-tokens/design-tokens.json` with X new components / Y new hooks."** List what was added so they can verify.
-4. **Append build metrics.** After the build completes, record build statistics to `.claude/design-tokens/build-stats.json` for local tracking.
+   - Tell the user: **"Updated `.claude/d2c/design-tokens.json` with X new components / Y new hooks."** List what was added so they can verify.
+4. **Append build metrics.** After the build completes, record build statistics to `.claude/d2c/build-stats.json` for local tracking.
 
    **Steps:**
-   1. Check if `.claude/design-tokens/build-stats.json` exists. If not, create it with an empty JSON array: `[]`.
+   1. Check if `.claude/d2c/build-stats.json` exists. If not, create it with an empty JSON array: `[]`.
    2. If it exists, read it and parse the JSON array.
    3. Construct a new entry object:
       ```json
@@ -1343,7 +1343,7 @@ After the audit:
 ## Critical Reminders
 
 - **NEVER discard the Figma screenshots from context.** They are required for every comparison round. If the session is resuming from a checkpoint and the screenshots are not in context, MUST re-fetch them via Figma MCP before continuing the comparison loop.
-- **Always read `.claude/design-tokens/design-tokens.json` before generating code.** Non-negotiable.
+- **Always read `.claude/d2c/design-tokens.json` before generating code.** Non-negotiable.
 - **Reuse over recreate.** Check existing components first. Always.
 - **Targeted fixes, not rewrites.** Each iteration changes as little as possible.
 - **Match the project's conventions.** Styling approach, file structure, naming patterns — match what's already there.

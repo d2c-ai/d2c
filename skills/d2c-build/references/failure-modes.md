@@ -97,14 +97,14 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 
 - **Phase:** 1
 - **Tier:** fatal
-- **Trigger:** `.claude/design-tokens/design-tokens.json` does not exist, is unreadable, or has `d2c_schema_version < 1`.
+- **Trigger:** `.claude/d2c/design-tokens.json` does not exist, is unreadable, or has `d2c_schema_version < 1`.
 - **Action:** Abort the build immediately. Do not proceed to Phase 2.
 - **Max retries:** 0 (fatal — no retry)
 - **Lock impact:** none
 - **Related rule:** Non-negotiable 1
 
 **User prompt:**
-> "Cannot start the build — `.claude/design-tokens/design-tokens.json` is {missing | unreadable | outdated (schema version {version})}. Run `/d2c-init` to set up your project's design tokens, then re-run `/d2c-build`."
+> "Cannot start the build — `.claude/d2c/design-tokens.json` is {missing | unreadable | outdated (schema version {version})}. Run `/d2c-init` to set up your project's design tokens, then re-run `/d2c-build`."
 
 ---
 
@@ -361,7 +361,7 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 - **Max retries:** N/A
 - **Lock impact:** canonical choice is recorded in the token-map and carried into decisions.lock.json
 - **Related rule:** Non-negotiable 3
-- **Source:** Item #6 (Token Conflict Detection) — `.claude/design-tokens/token-conflicts.json`
+- **Source:** Item #6 (Token Conflict Detection) — `.claude/d2c/token-conflicts.json`
 
 **Log line:**
 > "Token conflict resolved: used canonical `{canonical}` over `{duplicates}` for value `{resolved_value}` (resolved by {chosen_by})."
@@ -377,7 +377,7 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 - **Max retries:** N/A
 - **Lock impact:** user choices flow into token-map.json and then into decisions.lock.json
 - **Related rule:** Non-negotiable 3
-- **Source:** Item #6 (Token Conflict Detection) — `.claude/design-tokens/token-conflicts.json`
+- **Source:** Item #6 (Token Conflict Detection) — `.claude/d2c/token-conflicts.json`
 
 **User prompt:**
 > "Unresolved token conflicts from `/d2c-init` must be resolved before token mapping:

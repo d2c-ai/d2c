@@ -6,14 +6,14 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep, mcp__figma
 
 # Initialize Design System
 
-You are initializing the design-to-code workflow for this project. Your job is to deeply understand the existing codebase's design patterns and produce a `design-tokens.json` file at `.claude/design-tokens/design-tokens.json`.
+You are initializing the design-to-code workflow for this project. Your job is to deeply understand the existing codebase's design patterns and produce a `design-tokens.json` file at `.claude/d2c/design-tokens.json`.
 
 <!-- NON-NEGOTIABLES:BEGIN -->
 ## Non-negotiables
 
 These rules hold across every phase of this skill. No exceptions.
 
-1. **Design tokens MUST be loaded before any decision.** Read `.claude/design-tokens/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
+1. **Design tokens MUST be loaded before any decision.** Read `.claude/d2c/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
 2. **NEVER use a library outside `preferred_libraries.<category>.selected`.** The user explicitly chose which library to use for each capability. NEVER substitute an installed-but-not-selected library. If the design requires a capability not covered by `preferred_libraries`, STOP AND ASK.
 3. **NEVER hardcode color, spacing, typography, shadow, or radius values.** Every visual value MUST reference a design token from `design-tokens.json`. No raw hex, no magic numbers, no exceptions.
 4. **MUST reuse existing components when an existing component can serve the need.** Check the `components` array in `design-tokens.json` before creating anything new. If an existing component can do the job, MUST use it.
@@ -34,10 +34,10 @@ Parse `$ARGUMENTS` for optional flags:
 
 ## Pre-check: Incremental Update
 
-Before scanning, check if `.claude/design-tokens/design-tokens.json` exists.
+Before scanning, check if `.claude/d2c/design-tokens.json` exists.
 
-- If `--force` was passed in `$ARGUMENTS`: skip incremental detection, create the `.claude/design-tokens/` directory if needed, and proceed with a full scan (Steps 0-8).
-- If it **does not exist**: create the `.claude/design-tokens/` directory and proceed with a full scan (Steps 0-8).
+- If `--force` was passed in `$ARGUMENTS`: skip incremental detection, create the `.claude/d2c/` directory if needed, and proceed with a full scan (Steps 0-8).
+- If it **does not exist**: create the `.claude/d2c/` directory and proceed with a full scan (Steps 0-8).
 - If it **does exist**: read it into context. Check the `d2c_schema_version` field — if it is missing or less than 1 (the current version), the model MUST STOP AND ASK the user for confirmation before overwriting, using this prompt: "design-tokens.json uses an older schema version (found: {version or 'none'}). You MUST run `/d2c-init --force` to regenerate with the latest schema before any d2c-build or d2c-audit run. Confirm to proceed, or cancel to leave the file untouched." Only after explicit user confirmation, run a targeted scan:
   1. Check if the styling approach or config file has changed. If yes, re-extract tokens (Step 2) and re-run conflict detection (Step 2b).
   2. Scan only for new, modified, or deleted components and hooks since the file was last generated (compare file paths in the existing JSON against what's on disk).
@@ -126,7 +126,7 @@ After extracting tokens (Step 2) and before discovering components (Step 3), run
 Run the conflict detection script:
 
 ```
-node skills/d2c-init/scripts/detect-conflicts.js .claude/design-tokens/design-tokens.json
+node skills/d2c-init/scripts/detect-conflicts.js .claude/d2c/design-tokens.json
 ```
 
 If the script is not found at that path, use Glob to locate it (`**/detect-conflicts.js`) and run from wherever it lives.
@@ -165,7 +165,7 @@ If the number of unresolved conflicts exceeds the threshold, all unresolved conf
 
 ### Output
 
-Write `.claude/design-tokens/token-conflicts.json` with the schema defined in `skills/d2c-build/schemas/token-conflicts.schema.json`. Each conflict entry includes:
+Write `.claude/d2c/token-conflicts.json` with the schema defined in `skills/d2c-build/schemas/token-conflicts.schema.json`. Each conflict entry includes:
 
 - `id`: sequential `conflict-001`, `conflict-002`, etc.
 - `category`: the token category
@@ -493,7 +493,7 @@ Read the token schema reference file. Try these locations in order (first found 
 - `references/token-schema.md` (relative to this SKILL.md file)
 - Search with Glob for `**/token-schema.md` in `.claude/`, `.agents/`, and the skill install directories
 
-Write the file to `.claude/design-tokens/design-tokens.json`. Create the `.claude/design-tokens/` directory if it does not exist. Follow the schema exactly.
+Write the file to `.claude/d2c/design-tokens.json`. Create the `.claude/d2c/` directory if it does not exist. Follow the schema exactly.
 
 **Schema version:** Always write `"d2c_schema_version": 1` as the FIRST field in the JSON file. This is required for forward compatibility — the build and audit skills check this version before reading.
 
@@ -510,12 +510,12 @@ If no libraries are detected in any category, omit the `preferred_libraries` sec
 ### Step 6b: Auto-Split for Large Projects
 
 After writing `design-tokens.json` in Step 6, check its size:
-1. Count the line count of `.claude/design-tokens/design-tokens.json`.
+1. Count the line count of `.claude/d2c/design-tokens.json`.
 2. Estimate tokens as `Math.ceil(character_count / 4)`.
 
 **If the file exceeds 400 lines OR ~20,000 tokens:**
 
-Split the monolithic file into focused files in `.claude/design-tokens/`:
+Split the monolithic file into focused files in `.claude/d2c/`:
 
 | Split file | Contents |
 |------------|----------|

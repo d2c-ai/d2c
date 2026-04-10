@@ -1,12 +1,12 @@
 ---
 name: design-system-aware
-description: "Enforces design tokens, component reuse, SOLID/DRY principles, and preferred library conventions when editing frontend code. Activates on component file edits when .claude/design-tokens/design-tokens.json exists."
+description: "Enforces design tokens, component reuse, SOLID/DRY principles, and preferred library conventions when editing frontend code. Activates on component file edits when .claude/d2c/design-tokens.json exists."
 allowed-tools: Read
 ---
 
 # Design System Aware Code Generation
 
-**Trigger condition:** This skill activates when ANY component file inside `src/` or `app/` is being created or modified, AND `.claude/design-tokens/design-tokens.json` exists.
+**Trigger condition:** This skill activates when ANY component file inside `src/` or `app/` is being created or modified, AND `.claude/d2c/design-tokens.json` exists.
 
 Component file extensions by framework (read `framework` from `design-tokens.json`):
 - **react** / **solid**: `.tsx`, `.jsx`
@@ -21,7 +21,7 @@ Component file extensions by framework (read `framework` from `design-tokens.jso
 
 These rules hold across every phase of this skill. No exceptions.
 
-1. **Design tokens MUST be loaded before any decision.** Read `.claude/design-tokens/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
+1. **Design tokens MUST be loaded before any decision.** Read `.claude/d2c/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
 2. **NEVER use a library outside `preferred_libraries.<category>.selected`.** The user explicitly chose which library to use for each capability. NEVER substitute an installed-but-not-selected library. If the design requires a capability not covered by `preferred_libraries`, STOP AND ASK.
 3. **NEVER hardcode color, spacing, typography, shadow, or radius values.** Every visual value MUST reference a design token from `design-tokens.json`. No raw hex, no magic numbers, no exceptions.
 4. **MUST reuse existing components when an existing component can serve the need.** Check the `components` array in `design-tokens.json` before creating anything new. If an existing component can do the job, MUST use it.
@@ -35,7 +35,7 @@ When writing or editing frontend code in this project, follow these rules:
 
 ## Before Writing Code
 
-1. Check if `.claude/design-tokens/design-tokens.json` exists.
+1. Check if `.claude/d2c/design-tokens.json` exists.
 2. If it exists, read it and use it as the source of truth for all design decisions.
 3. Check the `components` section before creating any new component — reuse what exists.
 
@@ -57,7 +57,7 @@ If the `conventions` section does not exist, follow framework reference file def
 
 ## Token Usage
 
-- All colors, spacing, font sizes, shadows, and border radii must come from `.claude/design-tokens/design-tokens.json`.
+- All colors, spacing, font sizes, shadows, and border radii must come from `.claude/d2c/design-tokens.json`.
 - Never hardcode design values. No raw hex colors, no magic number padding or margins.
 - Use the project's styling approach as specified in `styling_approach`.
 
