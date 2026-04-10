@@ -503,6 +503,8 @@ Write the file to `.claude/design-tokens/design-tokens.json`. Create the `.claud
 
 If validation fails, fix the generated JSON to conform to the schema before writing. If the schema file is not found, proceed without validation but warn: "Schema validation skipped — design-tokens.schema.json not found."
 
+**Structural validation (flat tokens):** After schema validation, verify that all token values under `colors`, `spacing`, `typography`, `breakpoints`, `shadows`, and `borders` are **primitive** (string or number), never nested objects. The `d2c-build` validator (`walkTokens`) walks to leaf values and expects flat paths like `colors.primary` or `spacing.md`. If any token value is an object (e.g., `{ value: "#2563EB", css_var: "--color-primary" }`), flatten it: extract the resolved CSS value and store it directly (e.g., `"primary": "#2563EB"`). Also verify token categorization: spacing values (4px, 0.5rem, 16px) belong under `spacing`, border-radius values (0.375rem, 8px) belong under `borders` — never mix them. Warn the user if any recategorization was needed.
+
 If no libraries are detected in any category, omit the `preferred_libraries` section. If no data fetching library exists, omit the `api` section. Include the `conventions` section from Step 5h — omit conventions that don't apply to the detected framework (see Step 5h for applicability rules).
 
 ### Step 6b: Auto-Split for Large Projects
@@ -525,15 +527,14 @@ Split the monolithic file into focused files in `.claude/design-tokens/`:
 **Steps:**
 1. Read the complete `design-tokens.json`.
 2. For each split file, extract the relevant keys and write as a standalone JSON object.
-3. Add `"split_files": true` to the main `design-tokens.json` (after `d2c_schema_version`).
-4. The monolithic file remains the **source of truth**. Split files are derivatives for efficient loading.
-5. Tell the user: `"design-tokens.json is large ({lines} lines, ~{tokens} tokens). Created 4 split files for efficient per-phase loading: tokens-core.json, tokens-colors.json, tokens-components.json, tokens-conventions.json."`
+3. Rewrite `design-tokens.json` to contain ONLY `d2c_schema_version`, `split_files: true`, `framework`, and `meta_framework`. Remove all keys that were copied into split files (colors, spacing, typography, breakpoints, shadows, borders, components, conventions, preferred_libraries, api, hooks, figma_variables, etc.). The split files are now the source of truth — the monolithic file becomes a lightweight pointer.
+4. Tell the user: `"design-tokens.json is large ({lines} lines, ~{tokens} tokens). Created 4 split files for efficient per-phase loading: tokens-core.json, tokens-colors.json, tokens-components.json, tokens-conventions.json. The main file has been trimmed to avoid duplication."`
 
 **If the file is under 400 lines AND under 20,000 tokens:**
 - Do not create split files.
 - If `split_files` was previously set to `true` in the file but the file is now small enough, remove the flag and delete any stale split files.
 
-**On incremental updates:** When running an incremental update (pre-check detected existing file), if split files exist, regenerate only the split files whose source sections changed. For example, if only components changed, only rewrite `tokens-components.json`.
+**On incremental updates:** When running an incremental update (pre-check detected existing file), if split files exist, regenerate only the split files whose source sections changed. For example, if only components changed, only rewrite `tokens-components.json`. If `framework` or `meta_framework` changed, also update the trimmed `design-tokens.json` pointer file.
 
 ## Step 7: Check Playwright, Pixelmatch, and Pngjs
 

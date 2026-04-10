@@ -24,14 +24,15 @@ Store these as `THRESHOLD` and `MAX_ROUNDS` variables for use in Phase 4. If the
 ## Pre-flight Check
 
 Before anything else:
-1. Check that `.claude/design-tokens/design-tokens.json` exists. If it doesn't, tell the user to run `/d2c-init` first and stop.
+1. Check that `.claude/design-tokens/design-tokens.json` exists. If it doesn't, **automatically run `/d2c-init`** to scan the codebase and generate tokens. Wait for `d2c-init` to complete successfully before continuing with step 2. If `d2c-init` fails, stop and surface the error — do not proceed with the build.
 2. **Schema validation:** Validate `.claude/design-tokens/design-tokens.json` against the JSON Schema. Try these locations in order (first found wins):
    - `references/design-tokens.schema.json` (relative to this SKILL.md file)
    - Search with Glob for `**/design-tokens.schema.json` in `.claude/`, `.agents/`, and the skill install directories
 
    If validation fails, warn the user with the specific validation errors and ask: "design-tokens.json has schema errors. Run `/d2c-init --force` to regenerate, or continue anyway?" If the schema file is not found, skip validation silently.
 3. **Schema version check:** Read the `d2c_schema_version` field. If it is missing or less than 1 (the current version), warn the user: "design-tokens.json uses schema version {version or 'none'} but the current version is 1. Run `/d2c-init --force` to regenerate." Allow the user to continue or abort.
-4. **Load design tokens using the phased loading strategy below.** Do NOT read the entire file into context at once — load only the sections needed for the current phase.
+4. **Token structure check (flat tokens):** Spot-check that token values under `colors`, `spacing`, `typography`, `breakpoints`, `shadows`, and `borders` are primitive (string or number). If any value is an object (e.g., `{ value: "#2563EB", css_var: "..." }`), the token file has a nested structure that Phase 2 IR emission cannot handle. Warn: "design-tokens.json has nested token values (expected flat primitives like `\"primary\": \"#2563EB\"`). Run `/d2c-init --force` to regenerate with flat tokens." Allow the user to continue or abort.
+5. **Load design tokens using the phased loading strategy below.** Do NOT read the entire file into context at once — load only the sections needed for the current phase.
 
 ### Token Loading Strategy
 
@@ -57,7 +58,7 @@ If the `split_files` field is `true` in `design-tokens.json`, load the focused s
 - **Phase 5 (Code Quality Audit):** Read `tokens-colors.json` + `tokens-conventions.json` + `tokens-components.json`
 - **Phase 6 (Finalize):** Read `tokens-components.json` + `tokens-core.json`
 
-Each split file is a standalone JSON object — read it directly with `Read`, no section parsing needed. If a split file is missing, fall back to reading that section from the monolithic `design-tokens.json`.
+Each split file is a standalone JSON object — read it directly with `Read`, no section parsing needed. When `split_files: true`, the split files are the source of truth — the monolithic `design-tokens.json` is a lightweight pointer containing only `d2c_schema_version`, `split_files`, `framework`, and `meta_framework`. If a split file is missing, STOP AND ASK the user to run `/d2c-init --force` to regenerate.
 
 ## Step 0b: Token Budget Guard
 
@@ -161,6 +162,8 @@ After loading the Figma design context (from step 1.4, or if the Figma URL was p
 - **Medium** (skip question 6 only): Cards, inputs, selects, dropdowns, modals, dialogs, alerts, toasts, navigation items, tabs, breadcrumbs, list items. **Detection:** Figma node name matches one of these keywords (case-insensitive) AND total layer count is 50 or fewer.
 - **Complex** (ask all 6 questions): Pages, dashboards, forms, tables, layouts, sidebars, or any design with layer count > 50, or any design that does not match Simple or Medium keywords.
 
+**How to count layers:** Use `get_metadata` (or the metadata from `get_design_context`) to get the node tree. Count all descendant nodes of type FRAME, INSTANCE, COMPONENT, COMPONENT_SET, TEXT, RECTANGLE, ELLIPSE, LINE, VECTOR, GROUP, BOOLEAN_OPERATION, STAR, REGULAR_POLYGON. Exclude the root node itself. This count is the "total layer count" for classification.
+
 **Auto-fill defaults for skipped questions:**
 - Question 4 (viewports): Default to **"desktop-only"** for simple and medium components.
 - Question 6 (API): Default to **"no"** for simple components.
@@ -224,6 +227,7 @@ Wait for answers before proceeding. Do not assume defaults for any unanswered qu
 
 ### 1.4 — Load Design Context
 1. **Figma design context** — Use Figma MCP to pull design context and implementation details from the provided URL(s). Get layout, spacing, colors, typography, and component structure.
+   - **MCP fallback:** If the Figma Desktop MCP (`mcp__Figma__*`) is unavailable or errors, try the web-based Figma MCP (`mcp__*__get_design_context` with `fileKey` and `nodeId` extracted from the URL). Only escalate to the user (P1-FIGMA-UNREACHABLE) after both Desktop and web MCP providers have been tried and failed.
 2. **Figma screenshot(s)** — Use Figma MCP to get a screenshot of each viewport. **CRITICAL: Hold these screenshots in context for the entire session. You need them for every comparison round. Do not discard them.**
 3. **Target file context** — If slotting into an existing file, read it first. If it's a new file, read neighboring files to understand patterns (imports, layout conventions, naming).
 
@@ -288,6 +292,16 @@ Always recommend the option that best fits the project's existing stack and comp
 IR is the **plan** for the build. Before any code is written, Phase 2 produces four JSON artifacts in `.claude/design-tokens/runs/<timestamp>/` and runs `scripts/validate-ir.js` to verify them. Code generation in Phase 3 reads the validated IR as a **frozen** input — Non-negotiable rule 6 forbids re-deciding any IR value during codegen or retry.
 
 Three of the four artifacts are **authored** (the model decides their contents). The fourth (`run-manifest.json`) is **mechanical** bookkeeping written by this phase itself.
+
+**Version coupling rule:** All four IR artifacts (`run-manifest.json`, `component-match.json`, `token-map.json`, `layout.json`) MUST share the same `schema_version` value. Set `schema_version` to **1** for all artifacts unless explicitly instructed otherwise. If you use v2 for component-match (scored candidates), you MUST also set v2 for run-manifest, token-map, and layout. The validator rejects any version mismatch across artifacts.
+
+**Phase 2 Quick Reference:**
+- **2.0** Create run directory: `.claude/design-tokens/runs/<YYYY-MM-DDTHHMMSS>/`
+- **2.1** `run-manifest.json`: compute SHA-256 hash of `design-tokens.json` (or concatenated split files in order: `tokens-core | tokens-colors | tokens-components | tokens-conventions`)
+- **2.2** `component-match.json`: score candidates per node, pick highest
+- **2.3** `token-map.json`: map Figma properties to `<category>.<name>` token paths (must resolve to leaf values in design-tokens.json)
+- **2.4** `layout.json`: root region + 1 level nested, flex-only, deferred must be empty
+- **2.5** Run `validate-ir.js` — all artifacts must pass before Phase 3
 
 ### 2.0 — Create the run directory
 

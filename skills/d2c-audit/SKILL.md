@@ -67,7 +67,7 @@ Parse `$ARGUMENTS` for optional flags:
 | Audit 4 (Library Violations) | `tokens-conventions.json` (preferred_libraries for compliance) |
 | Audit 5 (Accessibility) | No token files needed (pure HTML/ARIA checks) |
 
-Load each split file only when starting its corresponding audit. If a split file is missing, fall back to the monolithic `design-tokens.json`.
+Load each split file only when starting its corresponding audit. When `split_files: true`, the split files are the source of truth — the monolithic file is a lightweight pointer. If a split file is missing, warn the user to run `/d2c-init --force` to regenerate.
 
 ---
 

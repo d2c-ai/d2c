@@ -15,7 +15,7 @@
     "schema_version": {
       "type": "integer",
       "enum": [1, 2],
-      "description": "IR artifact schema version. 1 = unscored matching, 2 = scored component matching."
+      "description": "IR artifact schema version. 1 = unscored matching, 2 = scored component matching. MUST match schema_version in all other IR artifacts (component-match, token-map, layout)."
     },
     "figma_url": {
       "type": "string",

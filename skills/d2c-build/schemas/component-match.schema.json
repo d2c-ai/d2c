@@ -8,7 +8,8 @@
   "properties": {
     "schema_version": {
       "type": "integer",
-      "enum": [1, 2]
+      "enum": [1, 2],
+      "description": "IR artifact schema version. MUST match schema_version in all other IR artifacts (run-manifest, token-map, layout). Validator rejects mismatches."
     },
     "nodes": {
       "type": "object",
