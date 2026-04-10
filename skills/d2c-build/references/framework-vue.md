@@ -7,6 +7,18 @@ These rules are ADDITIVE to the universal rules in SKILL.md.
 
 **Project conventions override:** If `design-tokens.json` contains a `conventions` section, those conventions take priority over the patterns in this file for stylistic decisions (export style, file naming, import ordering, barrel exports). This file remains authoritative for framework-specific syntax requirements (`<script setup>`, Composition API, `<template>`, `class` attribute, Vue directives).
 
+## 0. NON-NEGOTIABLES
+
+These Vue 3 / Nuxt 3 rules hold for every generated file. No exceptions.
+
+- **MUST use `<script setup lang="ts">` + Composition API.** NEVER emit Options API for new code. NEVER mix `<script setup>` and plain `<script>` in the same SFC.
+- **NEVER use `.value` inside `<template>`.** Vue automatically unwraps refs in templates. Writing `{{ count.value }}` instead of `{{ count }}` is a bug.
+- **MUST use `class`, NEVER `className`.** Vue uses the native HTML `class` attribute.
+- **MUST use `defineModel()` for v-model bindings in Vue 3.4+.** NEVER hand-roll the prop + emit pair when `defineModel()` is available.
+- **NEVER use React hooks (`useEffect`, `useState`).** Vue has no `useEffect`. Use `watch`, `watchEffect`, `ref`, `reactive`, or `onMounted`.
+
+---
+
 ## 1. KEY REMINDERS
 
 - Always use `<script setup lang="ts">` with Composition API. Never use Options API for new code.

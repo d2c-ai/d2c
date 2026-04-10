@@ -130,6 +130,11 @@
             "type": "array",
             "items": { "type": "string" },
             "description": "Alphabetically sorted list of prop names."
+          },
+          "import_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of files that import this component. Computed during d2c-init by counting import statements referencing the component file."
           }
         },
         "additionalProperties": false

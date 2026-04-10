@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "d2c Token Conflicts",
+  "description": "Records within-category token value collisions detected during d2c-init Step 2b. Advisory overlay — all tokens remain in design-tokens.json; this file guides downstream consumers to prefer canonical names.",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "threshold", "conflicts", "unresolved_count"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Schema version. Always 1 for now."
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "ISO 8601 timestamp of when this file was generated or last updated."
+    },
+    "threshold": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of unresolved conflicts above which STOP AND ASK is triggered. Default 5, configurable via --conflict-threshold."
+    },
+    "conflicts": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/conflict" }
+    },
+    "unresolved_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of conflicts with status 'unresolved'. Convenience field — always equals conflicts.filter(c => c.status === 'unresolved').length."
+    }
+  },
+  "definitions": {
+    "conflict": {
+      "type": "object",
+      "required": ["id", "category", "resolved_value", "canonical", "duplicates", "chosen_by", "status", "usage_counts"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^conflict-[0-9]{3,}$",
+          "description": "Stable identifier for this conflict group (e.g., conflict-001)."
+        },
+        "category": {
+          "type": "string",
+          "enum": ["colors", "spacing", "typography", "breakpoints", "shadows", "borders"],
+          "description": "Token category where the collision was detected."
+        },
+        "resolved_value": {
+          "type": "string",
+          "description": "The normalized value shared by all tokens in this conflict group."
+        },
+        "canonical": {
+          "type": ["string", "null"],
+          "description": "Dotted token path chosen as canonical (e.g., colors.primary). Null when status is 'unresolved'."
+        },
+        "duplicates": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "Dotted token paths of non-canonical tokens. Excludes the canonical path."
+        },
+        "chosen_by": {
+          "type": "string",
+          "enum": ["usage_frequency", "user_choice", "pending"],
+          "description": "How the canonical token was selected. 'pending' when unresolved."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["auto-resolved", "user-resolved", "unresolved"],
+          "description": "Resolution state of this conflict."
+        },
+        "usage_counts": {
+          "type": "object",
+          "description": "Map of dotted token path → grep-based usage count across source files.",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "resolution_note": {
+          "type": "string",
+          "description": "Human-readable explanation of the resolution decision."
+        }
+      }
+    }
+  }
+}

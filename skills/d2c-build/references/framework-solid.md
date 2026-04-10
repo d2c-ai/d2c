@@ -5,7 +5,19 @@ These rules are ADDITIVE to the universal rules in SKILL.md.
 
 ---
 
-**Project conventions override:** If `design-tokens.json` contains a `conventions` section, those conventions take priority over the canonical component template and patterns in this file for stylistic decisions (declaration style, export style, type definitions, file naming, import ordering, props pattern). This file remains authoritative for framework-specific syntax requirements (createSignal, createResource, `className`, no props destructuring at call site).
+**Project conventions override:** If `design-tokens.json` contains a `conventions` section, those conventions take priority over the canonical component template and patterns in this file for stylistic decisions (declaration style, export style, type definitions, file naming, import ordering, props pattern). This file remains authoritative for framework-specific syntax requirements (createSignal, createResource, `class`, no props destructuring at call site).
+
+## 0. NON-NEGOTIABLES
+
+These Solid.js / SolidStart rules hold for every generated file. No exceptions.
+
+- **NEVER destructure props in the component signature or body.** Solid's reactivity is fine-grained — destructuring breaks it. MUST access props via `props.xxx`. Use `splitProps` for safe forwarding and `mergeProps` for reactive defaults.
+- **MUST call signals as functions.** Write `count()` inside JSX and reactive contexts, NEVER bare `count`. Bare references read the getter function itself, not the value.
+- **MUST use `<For>` and `<Show>` components for control flow.** NEVER use `.map()` or conditional ternaries directly in JSX — they do not preserve DOM nodes across updates.
+- **NEVER use React hooks (`useState`, `useEffect`, `useMemo`).** Solid has no React hooks. Use `createSignal`, `createEffect`, `createMemo`, `createResource`.
+- **MUST use `class`, NEVER `className`.** Solid supports both but `class` is the documented convention in modern Solid.
+
+---
 
 ## 1. KEY REMINDERS
 

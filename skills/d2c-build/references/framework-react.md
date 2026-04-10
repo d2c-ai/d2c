@@ -9,6 +9,18 @@ These rules are ADDITIVE to the universal rules in SKILL.md.
 
 **Project conventions override:** If `design-tokens.json` contains a `conventions` section, those conventions take priority over the canonical component template and patterns in this file for stylistic decisions (declaration style, export style, type definitions, file naming, import ordering, props pattern). This file remains authoritative for framework-specific syntax requirements (JSX, hooks, `"use client"`, `className`).
 
+## 0. NON-NEGOTIABLES
+
+These React/Next.js rules hold for every generated file. No exceptions.
+
+- **MUST use `className`, NEVER `class`.** JSX does not accept the HTML `class` attribute.
+- **NEVER use `useEffect` for data fetching.** Use the library selected in `preferred_libraries.data_fetching.selected` (React Query, SWR, etc.). Fetching inside `useEffect` causes waterfalls and bypasses the selected data layer.
+- **NEVER mark a component `"use client"` unless it actually uses client hooks or browser APIs.** Server Components are the default in App Router; opting in unnecessarily ships extra JavaScript and breaks server-only imports.
+- **MUST provide a stable `key` on every `.map()`-produced element.** NEVER use the array index as the key when the list can reorder.
+- **MUST import React hooks from `"react"` directly.** NEVER alias or re-export them through a local barrel in a way that hides the origin.
+
+---
+
 ## 1. KEY REMINDERS
 
 - Add `"use client"` ONLY when a component uses hooks, events, or browser APIs. All other components are Server Components by default in App Router.

@@ -16,6 +16,21 @@ Component file extensions by framework (read `framework` from `design-tokens.jso
 - **astro**: `.astro`
 - If `framework` field is missing, default to `.tsx`/`.jsx` (React).
 
+<!-- NON-NEGOTIABLES:BEGIN -->
+## Non-negotiables
+
+These rules hold across every phase of this skill. No exceptions.
+
+1. **Design tokens MUST be loaded before any decision.** Read `.claude/design-tokens/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
+2. **NEVER use a library outside `preferred_libraries.<category>.selected`.** The user explicitly chose which library to use for each capability. NEVER substitute an installed-but-not-selected library. If the design requires a capability not covered by `preferred_libraries`, STOP AND ASK.
+3. **NEVER hardcode color, spacing, typography, shadow, or radius values.** Every visual value MUST reference a design token from `design-tokens.json`. No raw hex, no magic numbers, no exceptions.
+4. **MUST reuse existing components when an existing component can serve the need.** Check the `components` array in `design-tokens.json` before creating anything new. If an existing component can do the job, MUST use it.
+5. **MUST follow project conventions when `confidence > 0.6` and `value ≠ "mixed"`.** Project conventions (declaration style, export style, type definitions, import ordering, file naming, CSS wrapper, barrel exports, props pattern) override framework defaults.
+6. **NEVER re-decide a locked component or token.** Read `decisions.lock.json` from the IR run directory at the start of every phase after Phase 2. Only nodes with `status: "failed"` may have their component choice or token mapping changed. If a locked decision must change, STOP AND ASK.
+
+**When any rule is ambiguous, STOP AND ASK — do not guess.**
+<!-- NON-NEGOTIABLES:END -->
+
 When writing or editing frontend code in this project, follow these rules:
 
 ## Before Writing Code
@@ -61,7 +76,7 @@ If the `conventions` section does not exist, follow framework reference file def
 - If a UI pattern appears 2+ times, extract it into a reusable component. A pattern is "repeated" if 2+ elements share the same HTML structure (same nesting, same tag types) AND the same visual styling (same colors, spacing, border treatment). Different text content does not make a pattern different.
 - New components must be props-driven. No hardcoded content inside components.
 - Compose complex UI from small pieces: a `PageHeader` uses `Heading` + `Breadcrumbs` + `ActionBar`.
-- **Sub-component extraction rule:** Extract sub-components into separate files if they exceed 15 lines. Sub-components of 15 lines or fewer may stay in the parent file.
+- **Sub-component extraction rule:** MUST extract sub-components into separate files if they exceed 15 lines. Sub-components of 15 lines or fewer are permitted to stay in the parent file.
 
 ## SOLID
 

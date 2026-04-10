@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://d2c.dev/ir/run-manifest.schema.json",
+  "title": "d2c IR Run Manifest",
+  "description": "Mechanical bookkeeping file written by the d2c-build skill at the start of Phase 2 (IR emit). Anchors a run to a specific tokens file version and Figma URL. Not model-authored.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "figma_url",
+    "started_at",
+    "framework",
+    "tokens_file_hash"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1, 2],
+      "description": "IR artifact schema version. 1 = unscored matching, 2 = scored component matching."
+    },
+    "figma_url": {
+      "type": "string",
+      "description": "The Figma URL the run was initiated for."
+    },
+    "started_at": {
+      "type": "string",
+      "description": "ISO 8601 timestamp (with timezone) of when the run started."
+    },
+    "framework": {
+      "type": "string",
+      "enum": ["react", "vue", "svelte", "angular", "solid", "astro"],
+      "description": "Framework resolved from design-tokens.json at run start."
+    },
+    "tokens_file_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 hex digest of the tokens file(s) at run start. If split_files is false, hash of design-tokens.json. If split_files is true, hash of core|colors|components|conventions split files concatenated in that fixed order."
+    }
+  },
+  "additionalProperties": false
+}

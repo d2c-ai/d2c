@@ -8,6 +8,18 @@ CRITICAL: Use Svelte 5 runes syntax ONLY. Never emit Svelte 4 patterns.
 
 **Project conventions override:** If `design-tokens.json` contains a `conventions` section, those conventions take priority over the patterns in this file for stylistic decisions (export style, file naming, import ordering, barrel exports). This file remains authoritative for framework-specific syntax requirements (Svelte 5 runes, `$props()`, `$state()`, `{#each}`, `class` attribute).
 
+## 0. NON-NEGOTIABLES
+
+These Svelte 5 / SvelteKit rules hold for every generated file. No exceptions.
+
+- **MUST use Svelte 5 runes syntax ONLY.** NEVER emit Svelte 4 patterns (`export let`, `$:`, `on:click`, `<slot>`). If the project is on Svelte 4 or below, STOP AND ASK the user before proceeding — this file assumes Svelte 5.
+- **MUST use `$props()` for props, `$state()` for state, `$derived()` for computed, `$effect()` for side-effects only.** NEVER set state inside `$effect` — use `$derived` or `$derived.by` instead.
+- **Shared state files MUST use the `.svelte.ts` extension**, not plain `.ts`. Runes do not work outside a Svelte module context without that extension.
+- **MUST use `class`, NEVER `className`.** Svelte uses the native HTML `class` attribute.
+- **MUST use `{@render children()}` and `{#snippet}` for slots.** NEVER emit `<slot />` — it is Svelte 4 syntax.
+
+---
+
 ## 1. KEY REMINDERS
 
 - Use Svelte 5 runes ONLY. NEVER emit Svelte 4 patterns (`export let`, `$:`, `on:click`, `<slot>`).

@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://d2c.dev/ir/layout.schema.json",
+  "title": "d2c IR Layout (shallow)",
+  "description": "Model-authored shallow layout IR. v1 captures root + one level of nested regions, flex-only (row/col/wrap), gap as token reference. Non-flex regions go into deferred[] and fail validation. Nested regions beyond 1 level are not captured in v1.",
+  "type": "object",
+  "required": ["schema_version", "root", "regions", "deferred"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1, 2]
+    },
+    "root": {
+      "$ref": "#/definitions/root_region"
+    },
+    "regions": {
+      "type": "object",
+      "description": "Map of region nodeId -> leaf region entry. Each region corresponds to one of the nodeIds in root.regions.",
+      "additionalProperties": {
+        "$ref": "#/definitions/leaf_region"
+      }
+    },
+    "deferred": {
+      "type": "array",
+      "description": "Regions the model could not handle in v1 (grid, absolute, nested > 1 level, etc.). MUST be empty for success. Non-empty deferred[] fails validation and triggers STOP AND ASK.",
+      "items": {
+        "$ref": "#/definitions/deferred_entry"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "root_region": {
+      "type": "object",
+      "required": ["nodeId", "direction", "gap", "align", "justify", "regions"],
+      "properties": {
+        "nodeId": { "type": "string" },
+        "direction": {
+          "type": "string",
+          "enum": ["row", "col", "wrap"]
+        },
+        "gap": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z0-9][a-z0-9_-]*)+$",
+          "description": "Dotted token reference."
+        },
+        "align": {
+          "type": "string",
+          "enum": ["start", "center", "end", "stretch", "baseline"]
+        },
+        "justify": {
+          "type": "string",
+          "enum": ["start", "center", "end", "between", "around", "evenly"]
+        },
+        "regions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered list of region nodeIds. Each must have an entry in the regions map."
+        }
+      },
+      "additionalProperties": false
+    },
+    "leaf_region": {
+      "type": "object",
+      "required": ["direction", "gap", "align", "justify", "children"],
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": ["row", "col", "wrap"]
+        },
+        "gap": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z0-9][a-z0-9_-]*)+$"
+        },
+        "align": {
+          "type": "string",
+          "enum": ["start", "center", "end", "stretch", "baseline"]
+        },
+        "justify": {
+          "type": "string",
+          "enum": ["start", "center", "end", "between", "around", "evenly"]
+        },
+        "children": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered list of child nodeIds. Each MUST exist in component-match.json.nodes."
+        }
+      },
+      "additionalProperties": false
+    },
+    "deferred_entry": {
+      "type": "object",
+      "required": ["nodeId", "reason"],
+      "properties": {
+        "nodeId": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

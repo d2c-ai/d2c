@@ -142,3 +142,113 @@ if (process.env.JSON_OUTPUT === "1") {
     })
   );
 }
+
+// Region output: connected-component analysis on diff pixels
+if (process.env.REGIONS_OUTPUT === "1") {
+  const MIN_CLUSTER_PIXELS = 100; // Ignore noise clusters smaller than this
+  const MERGE_DISTANCE = 10; // Merge clusters within this many pixels of each other
+
+  // Build a boolean grid of "is this pixel different?"
+  const isDiff = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (width * y + x) << 2;
+      // Diff image marks differences with red pixels (R=255, G=0, B=0).
+      // Matching pixels are drawn as faded gray (R≈237, G≈237, B≈237).
+      // Check R high AND G low to distinguish diff pixels from matching.
+      isDiff[y * width + x] = (diff.data[idx] > 200 && diff.data[idx + 1] < 50) ? 1 : 0;
+    }
+  }
+
+  // Flood-fill connected components (4-connectivity)
+  const labels = new Int32Array(width * height).fill(-1);
+  const bboxes = []; // { x0, y0, x1, y1, count }
+  let nextLabel = 0;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const pos = y * width + x;
+      if (!isDiff[pos] || labels[pos] !== -1) continue;
+
+      // BFS flood fill
+      const label = nextLabel++;
+      const bbox = { x0: x, y0: y, x1: x, y1: y, count: 0 };
+      const queue = [pos];
+      labels[pos] = label;
+
+      while (queue.length > 0) {
+        const cur = queue.pop();
+        const cx = cur % width;
+        const cy = (cur - cx) / width;
+
+        bbox.x0 = Math.min(bbox.x0, cx);
+        bbox.y0 = Math.min(bbox.y0, cy);
+        bbox.x1 = Math.max(bbox.x1, cx);
+        bbox.y1 = Math.max(bbox.y1, cy);
+        bbox.count++;
+
+        // 4-connectivity neighbors
+        const neighbors = [
+          cy > 0 ? cur - width : -1,
+          cy < height - 1 ? cur + width : -1,
+          cx > 0 ? cur - 1 : -1,
+          cx < width - 1 ? cur + 1 : -1,
+        ];
+        for (const n of neighbors) {
+          if (n >= 0 && isDiff[n] && labels[n] === -1) {
+            labels[n] = label;
+            queue.push(n);
+          }
+        }
+      }
+
+      bboxes.push(bbox);
+    }
+  }
+
+  // Filter out noise clusters
+  let regions = bboxes.filter((b) => b.count >= MIN_CLUSTER_PIXELS);
+
+  // Merge clusters within MERGE_DISTANCE of each other
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (let i = 0; i < regions.length; i++) {
+      for (let j = i + 1; j < regions.length; j++) {
+        const a = regions[i];
+        const b = regions[j];
+        if (
+          a.x0 - MERGE_DISTANCE <= b.x1 &&
+          a.x1 + MERGE_DISTANCE >= b.x0 &&
+          a.y0 - MERGE_DISTANCE <= b.y1 &&
+          a.y1 + MERGE_DISTANCE >= b.y0
+        ) {
+          // Merge b into a
+          a.x0 = Math.min(a.x0, b.x0);
+          a.y0 = Math.min(a.y0, b.y0);
+          a.x1 = Math.max(a.x1, b.x1);
+          a.y1 = Math.max(a.y1, b.y1);
+          a.count += b.count;
+          regions.splice(j, 1);
+          merged = true;
+          break;
+        }
+      }
+      if (merged) break;
+    }
+  }
+
+  // Sort by diff pixel count descending (highest impact first)
+  regions.sort((a, b) => b.count - a.count);
+
+  const regionOutput = regions.map((r) => ({
+    x: r.x0,
+    y: r.y0,
+    w: r.x1 - r.x0 + 1,
+    h: r.y1 - r.y0 + 1,
+    diffPixels: r.count,
+    errorPercent: parseFloat(((r.count / totalPixels) * 100).toFixed(2)),
+  }));
+
+  console.log(JSON.stringify({ regions: regionOutput }));
+}

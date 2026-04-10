@@ -6,7 +6,24 @@ allowed-tools: Read, Bash, Glob, Grep
 
 # Design Token Drift Audit
 
-You are auditing this project's codebase to find violations of the design system. Your job is to detect hardcoded values that should use design tokens, find unused tokens, and report components that bypass the design system.
+You are auditing this project's codebase to find violations of the design system. Your job is to detect hardcoded values that MUST use design tokens, find unused tokens, and report components that bypass the design system. Every finding is a violation of a non-negotiable rule — treat the tokens file as authoritative.
+
+<!-- NON-NEGOTIABLES:BEGIN -->
+## Non-negotiables
+
+These rules hold across every phase of this skill. No exceptions.
+
+1. **Design tokens MUST be loaded before any decision.** Read `.claude/design-tokens/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
+2. **NEVER use a library outside `preferred_libraries.<category>.selected`.** The user explicitly chose which library to use for each capability. NEVER substitute an installed-but-not-selected library. If the design requires a capability not covered by `preferred_libraries`, STOP AND ASK.
+3. **NEVER hardcode color, spacing, typography, shadow, or radius values.** Every visual value MUST reference a design token from `design-tokens.json`. No raw hex, no magic numbers, no exceptions.
+4. **MUST reuse existing components when an existing component can serve the need.** Check the `components` array in `design-tokens.json` before creating anything new. If an existing component can do the job, MUST use it.
+5. **MUST follow project conventions when `confidence > 0.6` and `value ≠ "mixed"`.** Project conventions (declaration style, export style, type definitions, import ordering, file naming, CSS wrapper, barrel exports, props pattern) override framework defaults.
+6. **NEVER re-decide a locked component or token.** Read `decisions.lock.json` from the IR run directory at the start of every phase after Phase 2. Only nodes with `status: "failed"` may have their component choice or token mapping changed. If a locked decision must change, STOP AND ASK.
+
+**When any rule is ambiguous, STOP AND ASK — do not guess.**
+<!-- NON-NEGOTIABLES:END -->
+
+> **Note for d2c-audit:** These are the rules whose violations this skill reports. Every audit finding is a violation of one of the rules above. When `--fix` is passed, fixes MUST be verifiable against these rules before being applied — STOP AND ASK on any fix that is not a deterministic, token-exact match.
 
 ---
 
@@ -37,7 +54,7 @@ Parse `$ARGUMENTS` for optional flags:
 ## Pre-flight Check
 
 1. Check that `.claude/design-tokens/design-tokens.json` exists. If it doesn't, tell the user to run `/d2c-init` first and stop.
-2. **Schema version check:** Read the `d2c_schema_version` field. If it is missing or less than 1 (the current version), warn the user: "design-tokens.json uses schema version {version or 'none'} but the current version is 1. Run `/d2c-init --force` to regenerate." Allow the user to continue or abort.
+2. **Schema version check:** Read the `d2c_schema_version` field. If it is missing or less than 1 (the current version), STOP AND ASK the user: "design-tokens.json uses schema version {version or 'none'} but the current version is 1. You MUST run `/d2c-init --force` to regenerate before this audit can produce reliable results. Continue with the outdated schema anyway, or abort?" NEVER proceed past this check without an explicit user decision.
 3. Read `.claude/design-tokens/design-tokens.json` fully into context.
 
 **Split file support:** After reading `design-tokens.json`, check the `split_files` field. If `true`, load only the split files relevant to each audit instead of keeping the full file in context:
@@ -54,9 +71,9 @@ Load each split file only when starting its corresponding audit. If a split file
 
 ---
 
-## Audit 1: Hardcoded Values That Should Be Tokens
+## Audit 1: Hardcoded Values That Must Be Tokens
 
-Scan all component and source files for hardcoded values that exist in the design tokens or should be using them. Read the `framework` field from `design-tokens.json` to determine which file extensions to scan:
+Scan all component and source files for hardcoded values that exist in the design tokens or MUST be using them. Read the `framework` field from `design-tokens.json` to determine which file extensions to scan:
 
 - **react / solid / qwik**: `.tsx`, `.jsx`, `.ts`, `.js`
 - **vue**: `.vue` files (scan both `<template>` and `<style>` blocks), `.ts`, `.js`
@@ -70,7 +87,7 @@ Also scan style files: `.css`, `.scss`, `.module.css`, `.module.scss`.
 - Search for raw hex colors (`#[0-9a-fA-F]{3,8}`), `rgb(`, `rgba(`, `hsl(`, `hsla(` in component files and style files.
 - Exclude: SVG files, image assets, config files (`tailwind.config.*`, `postcss.config.*`), `node_modules`, `.next`, test files.
 - **Color comparison rule (exact match only):** Convert all found colors to lowercase 6-digit hex before comparison. Convert `rgb()` and `hsl()` values to hex. A match is exact hex equality only — no fuzzy matching, no "near-equivalent" matching.
-- For each hardcoded color found, check if it exactly matches any value in `design-tokens.json` → `colors`. If yes, label it `definite` — this value should use the token.
+- For each hardcoded color found, check if it exactly matches any value in `design-tokens.json` → `colors`. If yes, label it `definite` — this value MUST use the token.
 - Also flag colors that do NOT exactly match any token value — label these `undocumented`.
 
 ### Spacing
@@ -180,6 +197,27 @@ Search for `<input`, `<select`, `<textarea` that are not preceded by a `<label` 
 
 ---
 
+## Audit 6: Token Conflict Violations
+
+If `.claude/design-tokens/token-conflicts.json` exists and contains resolved conflicts (status `auto-resolved` or `user-resolved`), scan source files for references to non-canonical (duplicate) token names.
+
+For each resolved conflict entry, extract the `duplicates` array (these are the non-canonical token names). For each duplicate token name, search for its usage in source files:
+
+- **Tailwind projects:** Search for the duplicate name in class name contexts (e.g., `bg-{name}`, `text-{name}`, `border-{name}`, `p-{name}`, `m-{name}`, `gap-{name}`, `shadow-{name}`, `rounded-{name}`, and any other Tailwind utility prefix).
+- **CSS Variables projects:** Search for `var(--{name})` or `var(--{category}-{name})` in source files.
+- **CSS-in-JS projects:** Search for `theme.{category}.{name}` or `theme('{category}.{name}')` in source files.
+
+For each match found, report:
+
+| File | Line | Non-Canonical Token | Canonical Equivalent | Category |
+|------|------|---------------------|---------------------|----------|
+
+**This is report-only — do NOT auto-fix.** Both token names are valid; only one is preferred. Auto-fixing class names or variable references could break if the tokens later diverge intentionally.
+
+If `token-conflicts.json` does not exist or has no resolved conflicts, skip this audit with a brief note: "Skipped — no resolved token conflicts."
+
+---
+
 ## Report Format
 
 Present the audit results as a structured report:
@@ -225,12 +263,20 @@ Present the audit results as a structured report:
 
 **Total: X accessibility violations**
 
+### Token Conflict Violations (if applicable)
+| File | Line | Non-Canonical Token | Canonical Equivalent | Category |
+|------|------|---------------------|---------------------|----------|
+| src/components/Hero.tsx | 18 | brand-blue | primary | colors |
+
+**Total: X non-canonical token usages**
+
 ### Summary
 - Hardcoded values: X (Y are direct token matches, Z are new/undocumented)
 - Unused tokens: X
 - Component reuse violations: X
 - Preferred library violations: X
 - Accessibility violations: X
+- Token conflict violations: X (or "N/A — no resolved conflicts")
 - **Design system adherence score: X/100**
 ```
 
@@ -243,6 +289,8 @@ For each category, calculate a per-category score:
 3. **Component reuse (base weight: 20%)**: Count raw HTML elements in page-level files that have a corresponding component. Score = `((total_matchable_elements - violations) / total_matchable_elements) * 100`. If total_matchable_elements is 0, score is **N/A** (category excluded from weighted average).
 4. **Preferred libraries (base weight: 15%)**: Count all imports in scanned files that belong to a category with a selected library. Score = `((total_categorized_imports - violations) / total_categorized_imports) * 100`. If total_categorized_imports is 0 or no preferred_libraries exist, score is **N/A** (category excluded from weighted average).
 5. **Accessibility (base weight: 25%)**: Count all auditable elements (images, buttons, links, headings, click-handler divs, form inputs). Score = `((total_elements - violations) / total_elements) * 100`. If total_elements is 0, score is **N/A** (category excluded from weighted average).
+
+6. **Token conflict violations (informational — not scored)**: Count usages of non-canonical tokens from resolved conflicts. This is informational and does NOT affect the adherence score. Report count only.
 
 **N/A handling and weight redistribution:** When one or more categories have a score of N/A, exclude them from the final score calculation and redistribute their weights proportionally across the remaining categories. The redistribution formula is: `effective_weight = base_weight / sum_of_active_base_weights`. For example, if "Unused tokens" (10%) and "Preferred libraries" (15%) are both N/A, the remaining categories have base weights 30% + 20% + 25% = 75%. Their effective weights become: Hardcoded = 30/75 = 40%, Component reuse = 20/75 = 26.7%, Accessibility = 25/75 = 33.3%.
 

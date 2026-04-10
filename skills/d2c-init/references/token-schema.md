@@ -25,7 +25,8 @@ This file is loaded by d2c-init Step 6 when generating design-tokens.json.
       "name": "ComponentName",
       "path": "src/components/ui/ComponentName.tsx",
       "description": "What it does in plain English",
-      "props": ["variant", "size", "children"]
+      "props": ["variant", "size", "children"],
+      "import_count": 8
     }
   ],
   "hooks": [

@@ -7,6 +7,18 @@ These rules are ADDITIVE to the universal rules in SKILL.md.
 
 **Project conventions override:** If `design-tokens.json` contains a `conventions` section, those conventions take priority over the patterns in this file for stylistic decisions (export style, file naming, import ordering, barrel exports). This file remains authoritative for framework-specific syntax requirements (frontmatter fences, `Astro.props`, `client:*` directives, island architecture).
 
+## 0. NON-NEGOTIABLES
+
+These Astro rules hold for every generated file. No exceptions.
+
+- **MUST keep server-only code in the frontmatter fence, NEVER in client `<script>` tags.** Astro frontmatter runs at build/request time on the server; a `<script>` block runs in the browser. Mixing them leaks secrets and server-only imports.
+- **MUST use `client:*` directives deliberately on framework components.** NEVER ship unnecessary JavaScript — MUST choose `client:idle` or `client:visible` over `client:load` unless the component requires immediate hydration on first paint, and NEVER add a `client:*` directive to a component that has no interactivity.
+- **MUST use `class`, NEVER `className`, inside `.astro` files.** Island components (React/Vue/Svelte) use their own framework's attribute name.
+- **MUST use `astro:assets` (`<Image>`, `<Picture>`) for images in `src/`.** NEVER use raw `<img>` for local images — the Image component optimizes on build. Remote images and images in `public/` remain raw `<img>`.
+- **NEVER import a framework component without its integration declared in `astro.config.mjs`.** If a React/Vue/Svelte component is needed but the integration is missing, STOP AND ASK the user to install and configure it.
+
+---
+
 ## 1. KEY REMINDERS
 
 - `.astro` files produce ZERO JavaScript by default. All interactivity requires island components with `client:` directives.

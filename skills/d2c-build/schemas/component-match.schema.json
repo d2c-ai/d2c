@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://d2c.dev/ir/component-match.schema.json",
+  "title": "d2c IR Component Match",
+  "description": "Model-authored file mapping Figma node IDs to candidate components and the chosen component. Emitted in Phase 2 before any code generation. Cross-referenced by layout.json and consumed (frozen) by Phase 3 codegen. v1: unscored candidates. v2: scored top-3 candidates with breakdown.",
+  "type": "object",
+  "required": ["schema_version", "nodes"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1, 2]
+    },
+    "nodes": {
+      "type": "object",
+      "description": "Map of Figma node ID (e.g. '1:234') to component-match entry.",
+      "additionalProperties": {
+        "$ref": "#/definitions/node_entry"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "node_entry": {
+      "type": "object",
+      "required": [
+        "figma_name",
+        "figma_type",
+        "candidates",
+        "chosen",
+        "chosen_reasoning"
+      ],
+      "properties": {
+        "figma_name": {
+          "type": "string",
+          "description": "The Figma layer/instance name. Human-readable anchor for review."
+        },
+        "figma_type": {
+          "type": "string",
+          "description": "The Figma node type (e.g. INSTANCE, FRAME, COMPONENT)."
+        },
+        "candidates": {
+          "type": "array",
+          "description": "Candidate components considered for this node. v1: >= 1 entry. v2: 0-3 entries scored and sorted descending by score. Empty array is valid only when chosen is '__NEW__'.",
+          "minItems": 0,
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/definitions/candidate"
+          }
+        },
+        "chosen": {
+          "type": ["string", "null"],
+          "description": "The chosen componentId (must appear in candidates[].componentId), the literal '__NEW__' to signal a new component must be created, or null to signal ambiguity (validator fails fast on null)."
+        },
+        "chosen_reasoning": {
+          "type": "string",
+          "description": "Prose explaining why chosen was picked. Mandatory so the file is human-inspectable without Figma open."
+        }
+      },
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "required": ["componentId", "source", "reasoning"],
+      "properties": {
+        "componentId": {
+          "type": "string",
+          "description": "Display-only identifier for the candidate. The unique key for validation is 'source'."
+        },
+        "source": {
+          "type": "string",
+          "description": "File path to the candidate component, relative to project root."
+        },
+        "reasoning": {
+          "type": "string",
+          "description": "One-line explanation of why this component is a candidate."
+        },
+        "score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "v2 only. Composite score (0-100) = props_match + usage_frequency + alignment."
+        },
+        "score_breakdown": {
+          "$ref": "#/definitions/score_breakdown",
+          "description": "v2 only. Per-dimension scores that sum to 'score'."
+        },
+        "rejected_because": {
+          "type": "string",
+          "description": "v2 only. Required for non-chosen candidates. Why this candidate was not selected."
+        },
+        "user_confirmed": {
+          "type": "boolean",
+          "description": "v2 only. If true, the user confirmed this choice in Phase 1.4b, bypassing the 50-point threshold."
+        }
+      },
+      "additionalProperties": false
+    },
+    "score_breakdown": {
+      "type": "object",
+      "required": ["props_match", "usage_frequency", "alignment"],
+      "properties": {
+        "props_match": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50,
+          "description": "How many Figma visual properties map to component props. Formula: floor(matched_props / max(figma_identifiable_properties, 1) * 50)."
+        },
+        "usage_frequency": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 25,
+          "description": "Relative ranking by import_count among candidates for this node. Highest gets 25, others scale linearly. 13 if no data."
+        },
+        "alignment": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 25,
+          "description": "Semantic alignment between component name/description and Figma node name/context. Bands: 0-8 (none), 9-17 (partial), 18-25 (strong)."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -8,6 +8,18 @@ CRITICAL: Use Angular 17+ modern syntax ONLY. No NgModules, no decorators for I/
 
 **Project conventions override:** If `design-tokens.json` contains a `conventions` section, those conventions take priority over the patterns in this file for stylistic decisions (export style, type definitions, file naming, import ordering, barrel exports). This file remains authoritative for framework-specific syntax requirements (`@Component`, signals, dependency injection, Angular template syntax).
 
+## 0. NON-NEGOTIABLES
+
+These Angular 17+ rules hold for every generated file. No exceptions.
+
+- **MUST use standalone components.** NEVER emit `NgModule` for new code. Angular 19+ assumes `standalone: true` by default — NEVER add `standalone: true` explicitly on 19+.
+- **MUST use signal-based I/O and state.** Use `input()`, `input.required()`, `output()`, `signal()`, `computed()`, `effect()`. NEVER use `@Input()`/`@Output()` decorators for new components.
+- **MUST use `inject()` for dependency injection**, NEVER constructor injection for new services or components.
+- **MUST use `@if`/`@for`/`@switch` control flow syntax.** NEVER emit `*ngIf`/`*ngFor`/`*ngSwitch` structural directives — they are obsolete.
+- **MUST use `class`, NEVER `className`.** Angular templates use the native HTML `class` attribute.
+
+---
+
 ## 1. KEY REMINDERS
 
 - Use Angular 17+ modern syntax ONLY. No NgModules, no `@Input()`/`@Output()` decorators, no `*ngIf`/`*ngFor` structural directives.
@@ -56,7 +68,7 @@ CRITICAL: Use Angular 17+ modern syntax ONLY. No NgModules, no decorators for I/
 | TanStack Query         | `query = injectQuery(() => ({ queryKey: ['k'], queryFn: fetchFn }))` |
 | Resource (v19+)        | `data = resource({ request, loader })` or `rxResource({ request, loader })` |
 
-Default: inject services, return `Observable<T>`, convert with `toSignal()`. For signal-native async, prefer `resource()`/`rxResource()`. Never fetch directly in components.
+Default: inject services, return `Observable<T>`, convert with `toSignal()`. For signal-native async, MUST use `resource()` or `rxResource()`. NEVER fetch directly in components.
 
 ---
 

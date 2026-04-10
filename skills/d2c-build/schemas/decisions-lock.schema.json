@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://d2c.dev/ir/decisions-lock.schema.json",
+  "title": "d2c IR Decision Lock",
+  "description": "Freezes component choices and token mappings from Phase 2 IR so retries converge instead of re-rolling decisions. Written immediately after validate-ir.js exits 0. On retry, entries with status 'locked' are immutable; only 'failed' entries may be re-decided.",
+  "type": "object",
+  "required": ["schema_version", "locked_at", "layout_locked", "nodes"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1, 2],
+      "description": "IR artifact schema version. Must match component-match.json schema_version."
+    },
+    "locked_at": {
+      "type": "string",
+      "description": "ISO 8601 timestamp (with timezone) of when the lock was created."
+    },
+    "layout_locked": {
+      "type": "boolean",
+      "description": "If true, layout.json is frozen as a whole. Changing any layout decision requires full IR regeneration. Always true in v1."
+    },
+    "nodes": {
+      "type": "object",
+      "description": "Map of Figma node ID (e.g. '1:234') to lock entry. Keys must match component-match.json.nodes keys.",
+      "additionalProperties": {
+        "$ref": "#/definitions/node_lock"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "node_lock": {
+      "type": "object",
+      "required": ["componentId", "status", "locked_at"],
+      "properties": {
+        "componentId": {
+          "type": ["string", "null"],
+          "description": "The locked component choice. Must match component-match.json.nodes[nodeId].chosen for locked nodes. Null only when chosen was null (ambiguous, should not happen after validation). The literal '__NEW__' is stored as-is when creating a new component."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["locked", "failed"],
+          "description": "'locked' = immutable, do not re-decide. 'failed' = may be re-decided on retry."
+        },
+        "locked_at": {
+          "type": "string",
+          "description": "ISO 8601 timestamp when this node was locked (or re-locked after re-decision)."
+        },
+        "failure_reason": {
+          "type": "string",
+          "description": "Present only when status is 'failed'. Human-readable explanation of why this node needs re-decision."
+        },
+        "failed_at": {
+          "type": "string",
+          "description": "Present only when status is 'failed'. ISO 8601 timestamp when failure was marked."
+        },
+        "failed_by": {
+          "type": "string",
+          "enum": ["phase4_pixeldiff", "phase5_audit", "user_override"],
+          "description": "Present only when status is 'failed'. Which mechanism marked the failure."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

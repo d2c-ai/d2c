@@ -8,6 +8,23 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep, mcp__figma
 
 You are initializing the design-to-code workflow for this project. Your job is to deeply understand the existing codebase's design patterns and produce a `design-tokens.json` file at `.claude/design-tokens/design-tokens.json`.
 
+<!-- NON-NEGOTIABLES:BEGIN -->
+## Non-negotiables
+
+These rules hold across every phase of this skill. No exceptions.
+
+1. **Design tokens MUST be loaded before any decision.** Read `.claude/design-tokens/design-tokens.json`. If it is missing, unreadable, or has `d2c_schema_version < 1`, STOP AND ASK the user to run `/d2c-init` (or `/d2c-init --force` if outdated).
+2. **NEVER use a library outside `preferred_libraries.<category>.selected`.** The user explicitly chose which library to use for each capability. NEVER substitute an installed-but-not-selected library. If the design requires a capability not covered by `preferred_libraries`, STOP AND ASK.
+3. **NEVER hardcode color, spacing, typography, shadow, or radius values.** Every visual value MUST reference a design token from `design-tokens.json`. No raw hex, no magic numbers, no exceptions.
+4. **MUST reuse existing components when an existing component can serve the need.** Check the `components` array in `design-tokens.json` before creating anything new. If an existing component can do the job, MUST use it.
+5. **MUST follow project conventions when `confidence > 0.6` and `value ≠ "mixed"`.** Project conventions (declaration style, export style, type definitions, import ordering, file naming, CSS wrapper, barrel exports, props pattern) override framework defaults.
+6. **NEVER re-decide a locked component or token.** Read `decisions.lock.json` from the IR run directory at the start of every phase after Phase 2. Only nodes with `status: "failed"` may have their component choice or token mapping changed. If a locked decision must change, STOP AND ASK.
+
+**When any rule is ambiguous, STOP AND ASK — do not guess.**
+<!-- NON-NEGOTIABLES:END -->
+
+> **Note for d2c-init:** This skill creates the infrastructure (design-tokens.json, preferred_libraries, conventions) that the other skills enforce. Rules 1–5 above describe the contract d2c-init writes; d2c-build, d2c-audit, and design-system-aware depend on this file being correct. During initialization, any ambiguity about what to write to the tokens file MUST result in a STOP AND ASK — never guess.
+
 ## Arguments
 
 Parse `$ARGUMENTS` for optional flags:
@@ -21,12 +38,13 @@ Before scanning, check if `.claude/design-tokens/design-tokens.json` exists.
 
 - If `--force` was passed in `$ARGUMENTS`: skip incremental detection, create the `.claude/design-tokens/` directory if needed, and proceed with a full scan (Steps 0-8).
 - If it **does not exist**: create the `.claude/design-tokens/` directory and proceed with a full scan (Steps 0-8).
-- If it **does exist**: read it into context. Check the `d2c_schema_version` field — if it is missing or less than 1 (the current version), warn the user: "design-tokens.json uses an older schema version (found: {version or 'none'}). Consider running `/d2c-init --force` to regenerate with the latest schema." Then run a targeted scan:
-  1. Check if the styling approach or config file has changed. If yes, re-extract tokens (Step 2).
+- If it **does exist**: read it into context. Check the `d2c_schema_version` field — if it is missing or less than 1 (the current version), the model MUST STOP AND ASK the user for confirmation before overwriting, using this prompt: "design-tokens.json uses an older schema version (found: {version or 'none'}). You MUST run `/d2c-init --force` to regenerate with the latest schema before any d2c-build or d2c-audit run. Confirm to proceed, or cancel to leave the file untouched." Only after explicit user confirmation, run a targeted scan:
+  1. Check if the styling approach or config file has changed. If yes, re-extract tokens (Step 2) and re-run conflict detection (Step 2b).
   2. Scan only for new, modified, or deleted components and hooks since the file was last generated (compare file paths in the existing JSON against what's on disk).
   3. Check if `package.json` dependencies have changed — compare installed packages against the `preferred_libraries` section. If new libraries were added to an existing category, or a new category now has libraries, re-run Step 5 for those categories only. Ask the user to re-choose if a new competing library was added to a category that previously had only one.
   4. Merge changes into the existing `design-tokens.json` — add new entries, update changed entries, remove entries for deleted files.
-  5. Skip Steps 7-8's Playwright/pixelmatch install if already installed.
+  5. If tokens changed (steps 1 or 4 modified token values), re-run Step 2b conflict detection. Preserve existing `user-resolved` entries in `token-conflicts.json` where the tokens and values are still valid.
+  6. Skip Steps 7-8's Playwright/pixelmatch install if already installed.
   6. Check if the framework has changed (e.g., project migrated from React to Vue). If `framework` in existing file doesn't match current detection, warn the user: "Framework change detected: {old} → {new}. This will regenerate all framework-specific fields and may update preferred library categories. Proceed?" Wait for confirmation before re-running Step 0.
   7. Check if the `conventions` section exists in the existing `design-tokens.json`. If it does not exist (e.g., file created by an older version of init), run Step 5h to detect conventions. If it does exist, only re-scan conventions if component files have changed (same logic as item 2 — compare file paths on disk against what was previously scanned).
 
@@ -99,6 +117,79 @@ For all approaches, extract:
 - **Shadows**: box-shadow values
 - **Borders**: border-radius values, border widths
 
+## Step 2b: Detect Token Conflicts
+
+After extracting tokens (Step 2) and before discovering components (Step 3), run a duplicate-detection pass to identify within-category value collisions — two or more tokens whose resolved value is identical within the same category. This prevents invisible drift where the build silently picks one of several equivalent tokens.
+
+### Detection
+
+Run the conflict detection script:
+
+```
+node skills/d2c-init/scripts/detect-conflicts.js .claude/design-tokens/design-tokens.json
+```
+
+If the script is not found at that path, use Glob to locate it (`**/detect-conflicts.js`) and run from wherever it lives.
+
+Parse the stdout for `conflict:` lines. Each line has the format:
+
+```
+conflict: <category>:<normalized_value> — <path1>, <path2>, ...
+```
+
+If `detect-conflicts: ok` (no conflicts), skip the rest of this step.
+
+### Usage Counting
+
+For each conflict group detected, compute a rough usage count for each token name. The count is a simple grep for the token's leaf name (the last segment of the dotted path, e.g., `primary` from `colors.primary`) across source files with framework-appropriate extensions (`.tsx`, `.vue`, `.svelte`, `.component.ts`, `.astro`, `.ts`, `.jsx`, `.js`, `.css`). Search `src/` and `app/` directories. The count = number of matching lines.
+
+Only compute usage counts for tokens that are IN CONFLICT — not for every token.
+
+### Resolution Rules
+
+For each conflict group, apply these rules in order:
+
+1. **Deprecated-pattern check:** If ANY token name in the group contains a substring matching one of `deprecated`, `old`, `legacy`, `v1`, `v0`, `temp`, `tmp` (case-insensitive), force `status: "unresolved"` regardless of usage counts.
+
+2. **Zero-usage check:** If ALL tokens in the group have 0 usage count, set `status: "unresolved"`.
+
+3. **Usage-ratio check:** Sort tokens by usage count descending. If the highest-usage token has >= 2x the count of the second-highest, set `status: "auto-resolved"`, `canonical` = highest-usage path, `chosen_by: "usage_frequency"`.
+
+4. **Ambiguous (within 2x):** Otherwise, set `status: "unresolved"`, `chosen_by: "pending"`.
+
+### Threshold
+
+The default threshold is **5** unresolved conflicts. If the user passed `--conflict-threshold <N>` in `$ARGUMENTS`, use that value instead.
+
+If the number of unresolved conflicts exceeds the threshold, all unresolved conflicts will be presented to the user in Step 8 for resolution. Auto-resolved conflicts are always fine and do not count toward the threshold.
+
+### Output
+
+Write `.claude/design-tokens/token-conflicts.json` with the schema defined in `skills/d2c-build/schemas/token-conflicts.schema.json`. Each conflict entry includes:
+
+- `id`: sequential `conflict-001`, `conflict-002`, etc.
+- `category`: the token category
+- `resolved_value`: the normalized value
+- `canonical`: dotted token path of the winner (null if unresolved)
+- `duplicates`: array of dotted paths of non-canonical tokens (or all paths if unresolved)
+- `chosen_by`: `"usage_frequency"`, `"user_choice"`, or `"pending"`
+- `status`: `"auto-resolved"`, `"user-resolved"`, or `"unresolved"`
+- `usage_counts`: `{ "path": count }` for all tokens in the group
+- `resolution_note`: human-readable explanation
+
+### Incremental Behavior
+
+On incremental d2c-init re-runs (when `token-conflicts.json` already exists):
+
+1. Read the existing conflicts file.
+2. After running conflict detection on the fresh tokens, compare against existing entries.
+3. **Preserve** `user-resolved` entries where: the canonical token still exists in the fresh tokens, all duplicate tokens still exist, and they all still resolve to the same value.
+4. **Remove** entries where any token was deleted or its value changed.
+5. **Add** new conflict groups not already tracked.
+6. Re-compute `unresolved_count`.
+
+---
+
 ## Step 3: Discover Reusable Components
 
 Scan the project for existing UI components. Common locations:
@@ -117,11 +208,14 @@ For each component found, record:
 - **path**: File path relative to project root
 - **description**: Must follow this exact format: `[Component type] that [primary function]. Supports [key prop categories].` Example: `Button component that triggers actions. Supports variant, size, and loading state.` Do not use free-form descriptions — stick to this template.
 - **props**: The props it accepts (read from TypeScript types, PropTypes, or the JSX usage). List all prop names alphabetically.
+- **import_count**: The number of files that import this component (the same count used for inclusion criteria below). MUST be an integer ≥ 0. This value is used by `/d2c-build` Phase 2 for component matching scoring.
 
 **Inclusion criteria (deterministic):**
 - **Include** any component that is imported by 2+ files (check with grep for import statements referencing the component file).
 - **Include** any component that is imported by only 1 file IF it lives in a directory named `ui/`, `shared/`, `common/`, or `primitives/`.
 - **Skip** everything else — these are page-specific components.
+
+**Persist the import count:** The grep-based import count computed for the inclusion check above MUST be recorded as `import_count` on each included component entry. Do not discard this number — it feeds the component matching scoring system in `/d2c-build`.
 
 **Props extraction by framework:**
 - **React/Solid/Qwik** (`.tsx`/`.jsx`): Read TypeScript interface for props (e.g., `interface Props { ... }` or inline type annotation)
@@ -153,7 +247,7 @@ Record these in a section named based on framework:
 - Svelte: `stores`
 - Angular: `services`
 
-The JSON key in design-tokens.json is always `hooks` for consistency, but the description should use the framework's terminology.
+The JSON key in design-tokens.json is always `hooks` for consistency, but the description MUST use the framework's terminology (e.g., "composables" for Vue, "stores" for Svelte, "services" for Angular, "hooks" for React).
 
 Record these in a `hooks` section with name, path, and description.
 
@@ -213,7 +307,7 @@ For each category with 2+ libraries, present the options to the user with a reco
 >
 > For each category, which library should I use when generating new code?
 
-Wait for the user to respond. If the user says "go with recommendations" or similar, use all recommended options.
+Wait for the user to respond. If the user says "go with recommendations" or similar, treat those as the user's **selected** options and write them to `preferred_libraries.<category>.selected`. The user's choices are final — once written, NEVER substitute a different library when other skills read this file.
 
 ### Step 5f: Detect API-specific configuration
 
@@ -471,9 +565,43 @@ After generating the file:
    - **Preferred libraries** — list each category and the selected library. For categories where the user made a choice, note it. For auto-selected (single library) categories, note they were auto-selected.
    - API configuration detected (if any)
    - Figma variable mismatches (if any)
+   - **Token conflicts** — if `token-conflicts.json` exists and has entries, show the conflict summary (see below)
 2. Ask if anything looks wrong or missing
 3. If they correct something, update the file
 4. Confirm initialization is complete and they can now use `/d2c-build`
+
+### Token Conflict Presentation (Step 8)
+
+If `token-conflicts.json` has any entries, present them in the summary as follows:
+
+**Auto-resolved conflicts (FYI):**
+
+For each conflict with `status: "auto-resolved"`, show a single line:
+> - `{canonical}` chosen over `{duplicates joined with ", "}` ({usage ratio}x usage ratio)
+
+The user can override any auto-resolution by saying so. If they override, update the entry to `status: "user-resolved"`, `chosen_by: "user_choice"`, and set the new `canonical`.
+
+**Unresolved conflicts (needs input):**
+
+If there are unresolved conflicts, present each one:
+
+> **Token conflicts detected** — {unresolved_count} token groups need your input:
+>
+> 1. **{category}** value `{resolved_value}` is shared by:
+>    - `{dotted_path}` ({usage_count} references)
+>    - `{dotted_path}` ({usage_count} references)
+>    Recommendation: {highest-usage name if ratio >= 2x | "needs your input (usage too close)"}
+>
+> For each group, which token should be the canonical name? Options:
+> - Accept all recommendations
+> - Choose differently for specific groups
+> - Skip for now (d2c-build will ask again in Phase 2)
+
+When the user resolves a conflict, update `token-conflicts.json`:
+- Set `canonical` to the user's choice
+- Move the other paths to `duplicates`
+- Set `status: "user-resolved"`, `chosen_by: "user_choice"`
+- Re-compute `unresolved_count`
 
 ## Important Rules
 
