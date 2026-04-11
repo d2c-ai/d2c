@@ -123,13 +123,18 @@ After extracting tokens (Step 2) and before discovering components (Step 3), run
 
 ### Detection
 
+Resolve the conflict detection script. Try these locations in order (first match wins):
+1. **Relative to this skill file:** `scripts/detect-conflicts.js`
+2. **Agent Skills directory:** `~/.agents/skills/d2c-init/scripts/detect-conflicts.js`
+3. **Global skills directory:** `~/.claude/skills/d2c-init/scripts/detect-conflicts.js`
+4. **Global commands directory:** `~/.claude/commands/d2c-init/scripts/detect-conflicts.js`
+5. **Glob fallback:** Search for `**/detect-conflicts.js`
+
 Run the conflict detection script:
 
 ```
-node skills/d2c-init/scripts/detect-conflicts.js .claude/d2c/design-tokens.json
+node "$DETECT_CONFLICTS_SCRIPT" .claude/d2c/design-tokens.json
 ```
-
-If the script is not found at that path, use Glob to locate it (`**/detect-conflicts.js`) and run from wherever it lives.
 
 Parse the stdout for `conflict:` lines. Each line has the format:
 
@@ -260,8 +265,11 @@ This step scans `package.json` to find all installed libraries, groups them by c
 Read `package.json` → `dependencies` and `devDependencies`. For every installed package, check if it belongs to a known capability category. A library belongs to a category if its package name matches.
 
 Read the library categories reference file. Try these locations in order (first found wins):
-- `references/library-categories.md` (relative to this SKILL.md file)
-- Search with Glob for `**/library-categories.md` in `.claude/`, `.agents/`, and the skill install directories
+1. `references/library-categories.md` (relative to this SKILL.md file)
+2. `~/.agents/skills/d2c-init/references/library-categories.md`
+3. `~/.claude/skills/d2c-init/references/library-categories.md`
+4. `~/.claude/commands/d2c-init/references/library-categories.md`
+5. Glob fallback: search for `**/library-categories.md` in `.claude/`, `.agents/`, and the project root
 
 For each installed package, check if it belongs to a known category. Framework-specific categories (prefixed with vue_, svelte_, angular_, solid_) only apply if the detected framework matches.
 
@@ -490,16 +498,22 @@ Wait for the user's response. If they override a value, set `"override": true` f
 ## Step 6: Generate design-tokens.json
 
 Read the token schema reference file. Try these locations in order (first found wins):
-- `references/token-schema.md` (relative to this SKILL.md file)
-- Search with Glob for `**/token-schema.md` in `.claude/`, `.agents/`, and the skill install directories
+1. `references/token-schema.md` (relative to this SKILL.md file)
+2. `~/.agents/skills/d2c-init/references/token-schema.md`
+3. `~/.claude/skills/d2c-init/references/token-schema.md`
+4. `~/.claude/commands/d2c-init/references/token-schema.md`
+5. Glob fallback: search for `**/token-schema.md` in `.claude/`, `.agents/`, and the project root
 
 Write the file to `.claude/d2c/design-tokens.json`. Create the `.claude/d2c/` directory if it does not exist. Follow the schema exactly.
 
 **Schema version:** Always write `"d2c_schema_version": 1` as the FIRST field in the JSON file. This is required for forward compatibility — the build and audit skills check this version before reading.
 
 **Schema validation:** Before writing the file, validate the generated JSON against the JSON Schema. Try these locations in order (first found wins):
-- `references/design-tokens.schema.json` (relative to this SKILL.md file)
-- Search with Glob for `**/design-tokens.schema.json` in `.claude/`, `.agents/`, and the skill install directories
+1. `references/design-tokens.schema.json` (relative to this SKILL.md file)
+2. `~/.agents/skills/d2c-init/references/design-tokens.schema.json`
+3. `~/.claude/skills/d2c-init/references/design-tokens.schema.json`
+4. `~/.claude/commands/d2c-init/references/design-tokens.schema.json`
+5. Glob fallback: search for `**/design-tokens.schema.json` in `.claude/`, `.agents/`, and the project root
 
 If validation fails, fix the generated JSON to conform to the schema before writing. If the schema file is not found, proceed without validation but warn: "Schema validation skipped — design-tokens.schema.json not found."
 

@@ -26,8 +26,11 @@ Store these as `THRESHOLD` and `MAX_ROUNDS` variables for use in Phase 4. If the
 Before anything else:
 1. Check that `.claude/d2c/design-tokens.json` exists. If it doesn't, **automatically run `/d2c-init`** to scan the codebase and generate tokens. Wait for `d2c-init` to complete successfully before continuing with step 2. If `d2c-init` fails, stop and surface the error — do not proceed with the build.
 2. **Schema validation:** Validate `.claude/d2c/design-tokens.json` against the JSON Schema. Try these locations in order (first found wins):
-   - `references/design-tokens.schema.json` (relative to this SKILL.md file)
-   - Search with Glob for `**/design-tokens.schema.json` in `.claude/`, `.agents/`, and the skill install directories
+   1. `references/design-tokens.schema.json` (relative to this SKILL.md file)
+   2. `~/.agents/skills/d2c-init/references/design-tokens.schema.json`
+   3. `~/.claude/skills/d2c-init/references/design-tokens.schema.json`
+   4. `~/.claude/commands/d2c-init/references/design-tokens.schema.json`
+   5. Glob fallback: search for `**/design-tokens.schema.json` in `.claude/`, `.agents/`, and the project root
 
    If validation fails, warn the user with the specific validation errors and ask: "design-tokens.json has schema errors. Run `/d2c-init --force` to regenerate, or continue anyway?" If the schema file is not found, skip validation silently.
 3. **Schema version check:** Read the `d2c_schema_version` field. If it is missing or less than 1 (the current version), warn the user: "design-tokens.json uses schema version {version or 'none'} but the current version is 1. Run `/d2c-init --force` to regenerate." Allow the user to continue or abort.
@@ -95,9 +98,12 @@ Always display the one-line estimate so users know the context cost. Proceed wit
 
 1. Read the `framework` field from `.claude/d2c/design-tokens.json`.
 2. Read the framework reference file. Try these locations in order (first found wins):
-   - `references/framework-{framework}.md` (relative to this SKILL.md file — co-located in the `references/` subdirectory)
-   - Search with Glob for `**/framework-{framework}.md` in `.claude/`, `.agents/`, and the skill install directories
-   - If neither resolves, proceed without a reference file (step 4 applies).
+   1. `references/framework-{framework}.md` (relative to this SKILL.md file — co-located in the `references/` subdirectory)
+   2. `~/.agents/skills/d2c-build/references/framework-{framework}.md`
+   3. `~/.claude/skills/d2c-build/references/framework-{framework}.md`
+   4. `~/.claude/commands/d2c-build/references/framework-{framework}.md`
+   5. Glob fallback: search for `**/framework-{framework}.md` in `.claude/`, `.agents/`, and the project root
+   - If none resolves, proceed without a reference file (step 4 applies).
 3. All code generation in Phase 3 MUST follow both the universal rules in this SKILL.md AND the framework-specific rules in the loaded reference file. The reference file takes precedence for framework-specific syntax (file extensions, class vs className, props syntax, etc.).
 4. If the reference file does not exist, default to React/Next.js conventions (see inline fallback rules in Generation Rules section) and warn the user: "No framework reference file found for {framework}. Generating with React/Next.js defaults. Run /d2c-init to detect your framework."
 5. **Precedence rule for library choices:** `preferred_libraries` in `design-tokens.json` decides WHICH library to use. The framework reference file decides HOW to use that library (import syntax, hook patterns, file conventions). If the selected library is not listed in the reference file's patterns, use the library's standard import/API pattern from its documentation. `design-tokens.json` is always authoritative for library selection.
@@ -515,7 +521,12 @@ Rules:
 
 ### 2.5 — Run `validate-ir.js`
 
-Invoke the validator on the run directory. Resolve the script path with the same cascade as `pixeldiff.js`: try `references/scripts/validate-ir.js` relative to this SKILL.md, then `~/.claude/commands/d2c-build/scripts/validate-ir.js`, then `~/.claude/skills/d2c-build/scripts/validate-ir.js`, then `~/.agents/skills/d2c-build/scripts/validate-ir.js`, then Glob `**/validate-ir.js` as a last resort.
+Invoke the validator on the run directory. Resolve the script path by checking these locations in order (first match wins):
+1. `scripts/validate-ir.js` (relative to this SKILL.md file)
+2. `~/.agents/skills/d2c-build/scripts/validate-ir.js`
+3. `~/.claude/skills/d2c-build/scripts/validate-ir.js`
+4. `~/.claude/commands/d2c-build/scripts/validate-ir.js`
+5. Glob fallback: search for `**/validate-ir.js`
 
 ```bash
 node "$VALIDATE_IR_SCRIPT" ".claude/d2c/runs/<timestamp>/"
@@ -867,8 +878,8 @@ Run a pixel-diff comparison between the Figma screenshot and the Playwright scre
 **Locating pixeldiff.js:** The script ships with this skill. Resolve it by checking these locations in order (first match wins):
 
 1. **Relative to this skill file:** `scripts/pixeldiff.js` (works for project-level installs and plugin installs)
-2. **Global skills directory:** `~/.claude/skills/d2c-build/scripts/pixeldiff.js`
-3. **Agent Skills directory:** `~/.agents/skills/d2c-build/scripts/pixeldiff.js`
+2. **Agent Skills directory:** `~/.agents/skills/d2c-build/scripts/pixeldiff.js`
+3. **Global skills directory:** `~/.claude/skills/d2c-build/scripts/pixeldiff.js`
 4. **Global commands directory:** `~/.claude/commands/d2c-build/scripts/pixeldiff.js`
 5. **~/.d2c-deps cache:** `~/.d2c-deps/pixeldiff.js`
 6. **Glob fallback:** Search with `**/pixeldiff.js` across `~/.claude/`, `~/.agents/`, and the project root.
