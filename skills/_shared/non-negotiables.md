@@ -6,7 +6,7 @@ Skill files that embed this block:
 - `skills/d2c-init/SKILL.md`
 - `skills/d2c-build/SKILL.md`
 - `skills/d2c-audit/SKILL.md`
-- `skills/design-system-aware/SKILL.md`
+- `skills/d2c-guard/SKILL.md`
 
 The canonical block is everything between the BEGIN and END HTML comment markers below. Each skill file has the same markers surrounding an inline copy of this block. `validate-non-negotiables.js` extracts the content between the markers and asserts byte equality (whitespace-normalized).
 

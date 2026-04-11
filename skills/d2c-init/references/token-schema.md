@@ -173,7 +173,7 @@ Project conventions capture how the team writes code — stylistic choices that 
   - `component_declaration` and `props_pattern`: only for `react` and `solid` (Vue/Svelte/Angular/Astro have framework-dictated patterns)
   - `type_definition` and `type_location`: only for TypeScript projects (`.tsx`, `.ts`, `.component.ts`)
   - `css_utility_pattern`: only when `styling_approach` includes `tailwind`
-- **Priority chain:** conventions > design-tokens.json values > framework reference file defaults. The build skill and design-system-aware skill read `conventions.<key>.value` to determine which pattern to follow. If the `conventions` section does not exist (e.g., older init version), fall back to framework reference file patterns.
+- **Priority chain:** conventions > design-tokens.json values > framework reference file defaults. The build skill and d2c-guard skill read `conventions.<key>.value` to determine which pattern to follow. If the `conventions` section does not exist (e.g., older init version), fall back to framework reference file patterns.
 - The `import_ordering` value is an array of group names in the expected order. Common groups: `"framework"` (react, next, vue, svelte, etc.), `"external"` (third-party packages), `"internal"` (aliased paths like `@/`), `"relative"` (./), `"type"` (type-only imports), `"style"` (CSS/SCSS imports).
 - The `css_utility_pattern.wrapper_import` field records the import path for the wrapper function (e.g., `"@/lib/utils"` for a `cn()` helper). The build skill uses this to add the correct import when generating Tailwind classes.
 

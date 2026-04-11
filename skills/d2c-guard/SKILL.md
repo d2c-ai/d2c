@@ -1,5 +1,5 @@
 ---
-name: design-system-aware
+name: d2c-guard
 description: "Enforces design tokens, component reuse, SOLID/DRY principles, and preferred library conventions when editing frontend code. Activates on component file edits when .claude/d2c/design-tokens.json exists."
 allowed-tools: Read
 ---

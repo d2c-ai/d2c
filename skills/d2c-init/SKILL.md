@@ -23,7 +23,7 @@ These rules hold across every phase of this skill. No exceptions.
 **When any rule is ambiguous, STOP AND ASK — do not guess.**
 <!-- NON-NEGOTIABLES:END -->
 
-> **Note for d2c-init:** This skill creates the infrastructure (design-tokens.json, preferred_libraries, conventions) that the other skills enforce. Rules 1–5 above describe the contract d2c-init writes; d2c-build, d2c-audit, and design-system-aware depend on this file being correct. During initialization, any ambiguity about what to write to the tokens file MUST result in a STOP AND ASK — never guess.
+> **Note for d2c-init:** This skill creates the infrastructure (design-tokens.json, preferred_libraries, conventions) that the other skills enforce. Rules 1–5 above describe the contract d2c-init writes; d2c-build, d2c-audit, and d2c-guard depend on this file being correct. During initialization, any ambiguity about what to write to the tokens file MUST result in a STOP AND ASK — never guess.
 
 ## Arguments
 
