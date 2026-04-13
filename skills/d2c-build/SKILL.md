@@ -295,11 +295,13 @@ Always recommend the option that best fits the project's existing stack and comp
 
 ## Phase 2: Emit and Validate Intermediate Representation
 
+> **MANDATORY GATE — Read before proceeding.** Before emitting any IR artifact, read `references/failure-modes.md` lines 1-91 (Meta-Rules section + Quick Reference table). This primes you to recognize failure IDs and follow the correct tier (auto-recover, inform, or stop-and-ask). If you are about to continue past an error without prompting the user, STOP. Re-read the Anti-Rationalization rule. It applies to you right now.
+
 IR is the **plan** for the build. Before any code is written, Phase 2 produces four JSON artifacts in `.claude/d2c/runs/<timestamp>/` and runs `scripts/validate-ir.js` to verify them. Code generation in Phase 3 reads the validated IR as a **frozen** input — Non-negotiable rule 6 forbids re-deciding any IR value during codegen or retry.
 
 Three of the four artifacts are **authored** (the model decides their contents). The fourth (`run-manifest.json`) is **mechanical** bookkeeping written by this phase itself.
 
-**Version coupling rule:** All four IR artifacts (`run-manifest.json`, `component-match.json`, `token-map.json`, `layout.json`) MUST share the same `schema_version` value. Set `schema_version` to **1** for all artifacts unless explicitly instructed otherwise. If you use v2 for component-match (scored candidates), you MUST also set v2 for run-manifest, token-map, and layout. The validator rejects any version mismatch across artifacts.
+**Version coupling rule:** All four IR artifacts (`run-manifest.json`, `component-match.json`, `token-map.json`, `layout.json`) MUST share the same `schema_version` value. Set `schema_version` to **2** for ALL artifacts. Do not mix v1 and v2 — the validator rejects any version mismatch across artifacts. v2 is the current version and enables scored candidates with `score_breakdown` in component-match.json.
 
 **Phase 2 Quick Reference:**
 - **2.0** Create run directory: `.claude/d2c/runs/<YYYY-MM-DDTHHMMSS>/`
@@ -604,6 +606,8 @@ If the user passed `dry run` in $ARGUMENTS (see Phase 1.1b), halt here after ste
 
 ## Phase 3: Generate Code
 
+> **MANDATORY GATE — Read before proceeding.** Before writing any code, read `references/failure-modes.md` lines 1-91 (Meta-Rules section + Quick Reference table). Pay special attention to P3-IR-DEVIATION, P3-COMPONENT-GONE, and P3-PROP-MISMATCH. If at any point during codegen you feel the urge to "just use a different component" or "substitute a better token" — that is the Anti-Rationalization trap. STOP AND ASK.
+
 **Phase 3 preamble — non-negotiable.** Before writing any code, MUST read all three authored IR artifacts from `<ir_run_dir>/` (`component-match.json`, `token-map.json`, `layout.json`) AND the decision lock (`decisions.lock.json`). Treat them as **frozen inputs**. Verify all node entries in `decisions.lock.json` have `status: "locked"`. If any entry has `status: "failed"`, only that node's component choice and token mapping may differ from the original IR — all other nodes remain immutable.
 
 - NEVER re-decide a `chosen` component during codegen. If a component in `component-match.json.chosen` turns out to be a poor fit, STOP AND ASK — do not silently swap it.
@@ -655,7 +659,11 @@ Follow the Non-negotiables (rules 1–6 at the top of this file) and the Generat
 
 1. Write code for the primary viewport first (typically desktop).
 2. Add responsive behavior for other viewports using the project's breakpoint system from `design-tokens.json`.
-3. Use semantic HTML (`nav`, `main`, `section`, `article`, `aside`, `header`, `footer`, `button`) — not div soup.
+3. **Use semantic HTML** (`nav`, `main`, `section`, `article`, `aside`, `header`, `footer`, `button`) — not div soup. Every page MUST have a `<main>` element. Card titles should use heading elements (`<h3>`, `<h4>`), not styled `<div>` or `<p>`. Data tables should use `<table>`, not flex divs. Navigation should use `<nav>`. Sidebar sections should use `<aside>`.
+   - **WRONG:** `<div className="card"><div className="card-title">Revenue</div></div>`
+   - **RIGHT:** `<section className="card"><h3 className="card-title">Revenue</h3></section>`
+   - **WRONG:** `<div onClick={handleClick}>Submit</div>`
+   - **RIGHT:** `<button onClick={handleClick}>Submit</button>`
 4. **Accessibility (WCAG 2.2 AA minimum):**
    - All images must have `alt` text (descriptive for informational images, `alt=""` for decorative)
    - All form inputs must have associated `<label>` elements or `aria-label`
@@ -667,7 +675,9 @@ Follow the Non-negotiables (rules 1–6 at the top of this file) and the Generat
    - The root `<html>` element MUST have a `lang` attribute
    - Every new component must have a JSDoc comment above the function/component declaration: `/** Brief description. @param props.propName - Description */`
 5. **Image handling:** If Figma MCP is available, MUST use `get_screenshot` to export individual image/icon nodes from the Figma design and save them to the project's asset directory (e.g., `public/images/`). If export is not possible, use placeholder `src` values with a comment: `{/* Figma asset: [node name] */}`. For icons, MUST use the project's icon library from `preferred_libraries.icons` (this is Non-negotiable rule 2). NEVER substitute a different icon library.
-6. **Client/server boundary rule:** Follow the framework reference file's client/server boundary rules. Each framework handles this differently. Do NOT apply React's `"use client"` rule to non-React frameworks. **Inline fallback for React/Next.js (if reference file unavailable):** Add `"use client"` ONLY if the component uses: `useState`, `useEffect`, `useReducer`, `useContext`, `useRef` with DOM access, event handlers (`onClick`, `onChange`, `onSubmit`), browser APIs (`window`, `document`, `localStorage`), or third-party client hooks. All other components default to Server Components.
+6. **Client/server boundary rule:** Follow the framework reference file's client/server boundary rules. Each framework handles this differently. Do NOT apply React's `"use client"` rule to non-React frameworks. **Inline fallback for React/Next.js (if reference file unavailable):** Add `"use client"` ONLY if the component **directly** uses: `useState`, `useEffect`, `useReducer`, `useContext`, `useRef` with DOM access, event handlers (`onClick`, `onChange`, `onSubmit`), browser APIs (`window`, `document`, `localStorage`), or third-party client hooks. All other components default to Server Components. **Propagation rule:** Do NOT add `"use client"` to sub-components that are only imported by a parent client component. In Next.js App Router, child components of a client component are automatically client-rendered — the `"use client"` directive on children is redundant.
+   - **WRONG:** Parent has `"use client"`, child MetricCard also has `"use client"` even though it only receives props and renders JSX.
+   - **RIGHT:** Only the parent has `"use client"`. MetricCard has no directive — it is automatically client-rendered because its parent is a client component.
 7. Focus on the default/resting visual state. Add subtle transitions on interactive elements by default: `transition-colors duration-150` (or equivalent) on buttons, links, and clickable cards. Add `hover:opacity-80` or a framework-appropriate hover state for buttons. Do NOT implement complex animations, active states, or loading animations unless the user explicitly requests them or the Figma design includes them as separate frames.
 8. **Tailwind class selection rule (if Tailwind):** MUST use the shortest Tailwind class that achieves the exact value. MUST use scale classes (`p-4`) when the value is in the scale — NEVER substitute arbitrary values (`p-[16px]`) when a scale class exists. Use arbitrary values ONLY when no scale class matches. NEVER use longhand (`px-4 py-4`) when shorthand (`p-4`) achieves the same result. For colors, MUST use the semantic token class (`bg-primary`) over the raw color class (`bg-blue-500`) when a semantic token exists. **Use the framework's class attribute name** — `className` for React/Solid (JSX), `class` for Vue/Svelte/Angular/Astro/Qwik. Check the framework reference file.
 
@@ -747,6 +757,8 @@ This map MUST be written before the first verification round begins. It is consu
 ---
 
 ## Phase 4: Visual Verification Loop
+
+> **MANDATORY GATE — Read before proceeding.** Before the first verification round, read `references/failure-modes.md` lines 1-91 (Meta-Rules section + Quick Reference table). Key failure modes in this phase: P4-DEV-SERVER, P4-REGRESSION, P4-PLATEAU, P4-IR-LOCK-CONFLICT, P4-FILE-OUT-OF-SCOPE, P4-SHARED-BLAST-RADIUS, P4-FIGMA-SCREENSHOT-UNSAVEABLE. If pixeldiff is unavailable, you MUST still complete all rounds using visual-only comparison — do NOT skip rounds or exit early.
 
 After generating the code, run this loop. **Maximum `MAX_ROUNDS` rounds** (default 4, configurable via `--max-rounds`).
 
@@ -888,14 +900,31 @@ Store the resolved path in a variable (e.g., `PIXELDIFF_SCRIPT`) and reuse it fo
 
 **A.1 — Capture the Figma design screenshot**
 
-Use Figma MCP's `get_screenshot` tool to capture the target node. The screenshot is returned as image data in context.
+Use Figma MCP's `get_screenshot` tool to capture the target node. The screenshot must be saved to disk at `$D2C_TMP/figma-screenshot.png` for pixeldiff comparison. Try these methods **in order** — use the first one that succeeds:
 
-To save it to disk for pixeldiff comparison:
-- If the Figma MCP returns a **download URL**: use `curl -sS -o $D2C_TMP/figma-screenshot.png "<url>"` to download it.
-- If the Figma MCP returns **base64-encoded data**: use the Bash tool to decode and write it: `echo "<base64data>" | base64 -d > $D2C_TMP/figma-screenshot.png`
-- If the Figma MCP returns the image **inline in context only** (no URL or base64): use the `get_screenshot` tool with the `save_to_disk` option if available, or re-request the screenshot and pipe it to a file.
+<!-- fm:P4-FIGMA-SCREENSHOT-UNSAVEABLE -->
 
-Verify the file was saved correctly: `file $D2C_TMP/figma-screenshot.png` should report "PNG image data".
+**Method 1 — Download URL:** If the Figma MCP returns a **download URL** in its response, download it:
+```bash
+curl -sS -o $D2C_TMP/figma-screenshot.png "<url>"
+```
+
+**Method 2 — Base64 data:** If the Figma MCP returns **base64-encoded image data**, decode and write it:
+```bash
+echo "<base64data>" | base64 -d > $D2C_TMP/figma-screenshot.png
+```
+
+**Method 3 — save_to_disk parameter:** If the Figma MCP tool supports a `save_to_disk` parameter, call `get_screenshot` again with that parameter set to `true` and a target path.
+
+**Method 4 — Playwright Figma capture:** If all MCP-based methods fail (the image is returned inline in context only with no URL, base64, or save option), use Playwright to capture the Figma design directly:
+```bash
+npx playwright screenshot --viewport-size=1440,900 "https://www.figma.com/design/<fileKey>/<fileName>?node-id=<nodeId>&m=dev" $D2C_TMP/figma-screenshot.png
+```
+Note: This requires Figma to be publicly accessible or the user to be logged in via the browser Playwright uses. If this also fails, proceed to Method 5.
+
+**Method 5 — Visual-only fallback:** If none of the above methods produce a file on disk, follow P4-FIGMA-SCREENSHOT-UNSAVEABLE in `references/failure-modes.md`. The build continues with **visual-only comparison** (no pixeldiff score) but MUST still complete all `MAX_ROUNDS` verification rounds using side-by-side visual judgment. Do NOT skip remaining rounds just because pixeldiff is unavailable.
+
+**Verification:** After any successful method (1-4), verify: `file $D2C_TMP/figma-screenshot.png` should report "PNG image data". If verification fails, fall through to the next method.
 
 The Playwright screenshot is already at `$D2C_TMP/d2c-screenshot.png`.
 
@@ -1111,10 +1140,14 @@ When multiple issues have similar red pixel density, prioritize in this order:
 
 ## Phase 5: Code Quality Audit
 
+> **MANDATORY GATE — Read before proceeding.** Before starting the audit, read `references/failure-modes.md` lines 1-91 (Meta-Rules section + Quick Reference table). Key failure modes: P5-HARDCODED-MATCH, P5-HARDCODED-NOVEL, P5-LIBRARY-VIOLATION, P5-IR-UNAUTHORIZED-COMPONENT, P5-IR-UNAUTHORIZED-TOKEN. Every preamble violation MUST trigger a STOP AND ASK — no exceptions, no "this one is obviously fine" rationalization.
+>
+> **MANDATORY: Bucket F (IR honor check) MUST be executed.** Before proceeding to Phase 6, you MUST explicitly confirm: "Bucket F: executed, N violations found." If context budget is insufficient to run Bucket F, STOP AND ASK: "I don't have enough context to run the IR honor check (Bucket F). Options: (1) skip non-preamble buckets B/D/E to free context, (2) proceed without Bucket F and note it as skipped in the build report. Which?" Do NOT silently skip Bucket F.
+
 After the visual verification loop ends, run a scoped audit on **only the files created or modified during this build session** (not the entire codebase). This catches code-level issues that visual verification misses.
 
 Violations found in Phase 5 are split into two buckets:
-- **Preamble violations** (bucket A and bucket C below) — violations of the Non-negotiables at the top of this file. These MUST NOT be auto-fixed silently. STOP AND ASK the user.
+- **Preamble violations** (bucket A, bucket C, and **bucket F**) — violations of the Non-negotiables at the top of this file. These MUST NOT be auto-fixed silently. STOP AND ASK the user.
 - **Non-preamble violations** (buckets B, D, E) — accessibility fixes, missing JSDoc, convention style. Auto-fix silently.
 
 ### 5.1 — Track files touched
@@ -1212,9 +1245,15 @@ Follow PX-CASCADE in `references/failure-modes.md` — STOP AND ASK with options
 
 ## Phase 6: Finalize
 
+**Pre-Phase 6 checklist — verify before proceeding:**
+- [ ] Phase 5 Bucket F (IR honor check) was executed. If not, go back and execute it or confirm with the user that it was intentionally skipped.
+- [ ] All STOP AND ASK prompts from Phase 5 have been resolved (user responded to each).
+- [ ] Preamble compliance status is recorded (PASS or FAIL).
+
 After the audit:
 
 0. **Delete the checkpoint file.** Remove `.claude/d2c/.d2c-build-checkpoint.json` if it exists. The build completed successfully — no resume needed.
+0b. **Delete the build runs directory.** Remove the entire `.claude/d2c/runs/` directory if it exists. The IR artifacts served their purpose during the build and are no longer needed.
 1. Ensure all new components are properly exported and TypeScript types are correct.
 2. **Display the Build Report.** Output the following 3 tables as the build summary. Use the exact table formats below, filling in actual values from this build.
 

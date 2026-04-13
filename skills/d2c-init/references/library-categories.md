@@ -7,7 +7,7 @@ This file is loaded by d2c-init Step 5a when scanning package.json for installed
 | Category | Known libraries |
 |----------|----------------|
 | data_fetching | `@tanstack/react-query`, `@tanstack/query`, `swr`, `axios`, `@apollo/client`, `urql`, `graphql-request` |
-| realtime | `ably`, `socket.io-client`, `pusher-js`, `@supabase/realtime-js`, `firebase`, `@firebase/messaging` |
+| realtime | `ably`, `socket.io-client`, `pusher-js`, `@supabase/realtime-js`, `firebase`, `@firebase/messaging`, `ws`, `@trpc/client`, `liveblocks`, `@liveblocks/react`, `partykit`, `y-websocket` |
 | state_management | `zustand`, `@reduxjs/toolkit`, `redux`, `jotai`, `recoil`, `mobx`, `mobx-react`, `valtio`, `xstate` |
 | forms | `react-hook-form`, `formik`, `@tanstack/react-form`, `final-form`, `react-final-form` |
 | validation | `zod`, `yup`, `joi`, `superstruct`, `valibot`, `@sinclair/typebox` |
@@ -23,11 +23,11 @@ This file is loaded by d2c-init Step 5a when scanning package.json for installed
 | maps | `react-map-gl`, `@react-google-maps/api`, `leaflet`, `react-leaflet`, `mapbox-gl`, `@vis.gl/react-google-maps` |
 | rich_text | `tiptap`, `@tiptap/react`, `slate`, `slate-react`, `draft-js`, `react-quill`, `@lexical/react` |
 | drag_and_drop | `@dnd-kit/core`, `react-beautiful-dnd`, `@hello-pangea/dnd`, `react-dnd` |
-| testing | `vitest`, `jest`, `@testing-library/react`, `cypress`, `playwright` |
+| testing | `vitest`, `jest`, `@testing-library/react`, `@testing-library/vue`, `@testing-library/svelte`, `cypress`, `playwright`, `@playwright/test`, `@playwright/experimental-ct-react`, `happy-dom`, `jsdom` |
 | css_in_js | `styled-components`, `@emotion/styled`, `@emotion/css`, `@stitches/react`, `vanilla-extract` |
 | component_library | `@mui/material`, `@mantine/core`, `@chakra-ui/react`, `@radix-ui/themes`, `@nextui-org/react`, `antd`, `@shadcn/ui` |
 | internationalization | `next-intl`, `react-i18next`, `i18next`, `react-intl`, `@formatjs/intl` |
-| auth | `next-auth`, `@auth/core`, `@clerk/nextjs`, `@supabase/auth-helpers-nextjs`, `firebase/auth` |
+| auth | `next-auth`, `@auth/core`, `@auth0/nextjs-auth0`, `@auth0/auth0-react`, `@clerk/nextjs`, `@clerk/clerk-react`, `lucia`, `better-auth`, `@supabase/auth-helpers-nextjs`, `@supabase/ssr`, `firebase/auth`, `@kinde-oss/kinde-auth-nextjs` |
 | vue_data_fetching | `@tanstack/vue-query`, `ofetch` |
 | vue_state | `pinia`, `vuex` |
 | vue_forms | `vee-validate`, `formkit`, `@tanstack/vue-form` |

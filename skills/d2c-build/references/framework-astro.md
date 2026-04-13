@@ -118,3 +118,19 @@ Rules:
 The `island_framework` detected in `design-tokens.json` determines which component libraries apply for interactive islands. Check `astro.config.mjs` for installed integrations before adding new ones.
 
 Rule: check `package.json` before importing. If a library from this table is already installed, use it. Never add a second library for the same category.
+
+---
+
+## Library Boundary Values (SVG Chart Libraries)
+
+Some libraries accept color/style values as string props, not CSS classes or variables. SVG-based chart libraries (used inside island components) require hex/rgb strings because the SVG renderer does not resolve CSS custom properties at the attribute level.
+
+**Pattern: Resolve CSS variables at runtime inside the island component** using the island framework's idiom (React `useMemo`, Vue `onMounted`, Svelte `$effect`). See the corresponding framework reference for the exact pattern.
+
+**When runtime resolution is not feasible**, hardcoding is acceptable but MUST include a comment linking the value to its token:
+
+```astro
+<!-- Token: colors.primary (#2563EB) — hardcoded for SVG chart compatibility -->
+```
+
+These values are **exempt from the Phase 5 hardcoded-values audit** (bucket A) because the library API requires them.

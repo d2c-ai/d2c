@@ -108,3 +108,31 @@ Angular is client-side by default. All components render on the client.
 | i18n               | `@ngx-translate/core`, `@angular/localize` (built-in)          |
 
 Rule: check `package.json` before importing. If a library from this table is already installed, use it. Never add a second library for the same category.
+
+---
+
+## Library Boundary Values (SVG Chart Libraries)
+
+Some libraries accept color/style values as string props, not CSS classes or variables. SVG-based chart libraries (ngx-charts, d3, @angular/cdk) require hex/rgb strings because the SVG renderer does not resolve CSS custom properties at the attribute level.
+
+**Pattern: Resolve CSS variables at runtime via a service or computed getter.**
+
+```typescript
+import { inject, computed, signal } from '@angular/core';
+import { DOCUMENT } from '@angular/common';
+
+function resolveTokenColor(doc: Document, tokenVar: string): string {
+  return getComputedStyle(doc.documentElement)
+    .getPropertyValue(tokenVar)
+    .trim() || '#000000';
+}
+```
+
+**When runtime resolution is not feasible**, hardcoding is acceptable but MUST include a comment linking the value to its token:
+
+```typescript
+// Token: colors.primary (#2563EB) — hardcoded for SVG chart compatibility
+[attr.fill]="'#2563EB'"
+```
+
+These values are **exempt from the Phase 5 hardcoded-values audit** (bucket A) because the library API requires them.

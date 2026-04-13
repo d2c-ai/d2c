@@ -48,7 +48,7 @@ This file is loaded by d2c-init Step 6 when generating design-tokens.json.
     "query_client_path": "<path to QueryClient setup if using React Query/SWR>",
     "base_url_env": "<environment variable name for API base URL, e.g., NEXT_PUBLIC_API_URL>",
     "response_envelope": "<exact key names if consistent across 3+ responses, e.g., { data, error, meta } | none-detected>",
-    "auth_pattern": "<axios-interceptor | fetch-wrapper | next-auth-session | auth-header-manual | none-detected>",
+    "auth_pattern": "<axios-interceptor | fetch-wrapper | next-auth-session | auth0-session | clerk-session | supabase-session | auth-header-manual | none-detected>",
     "error_handling": "<toast | error-boundary | inline-message | console-only | mixed | none-detected>",
     "loading_pattern": "<react-query-isLoading | swr-isLoading | suspense | useState-loading | skeleton-component | mixed | none-detected>"
   },
@@ -118,6 +118,21 @@ This file is loaded by d2c-init Step 6 when generating design-tokens.json.
   }
 }
 ```
+
+## Token value rules
+
+All token values under `colors`, `spacing`, `typography`, `breakpoints`, `shadows`, and `borders` MUST be **flat primitives** (string or number). Never store nested objects. The `d2c-build` validator walks to leaf values and expects flat paths like `colors.primary` or `spacing.md`. If any token value is an object (e.g., `{ value: "#2563EB", css_var: "--color-primary" }`), flatten it: extract the resolved CSS value and store it directly.
+
+### Dark mode tokens
+
+**Design decision:** Store only the light mode (`:root`) token values. Dark mode overrides (from `.dark`, `[data-theme="dark"]`, or `@media (prefers-color-scheme: dark)` selectors) are NOT extracted as separate token entries. This is intentional:
+
+1. **Tailwind projects:** Dark mode is CSS-level (`dark:bg-background`), not token-level. The token value is the light-mode default; Tailwind's `dark:` prefix applies the dark override from the theme config automatically.
+2. **CSS variable projects:** Multiple `:root` and `[data-theme="dark"]` blocks reference the same semantic token names. CSS cascading handles the theme switch at runtime.
+3. **Schema constraint:** Nesting colors under `{ light: {...}, dark: {...} }` would break the flat-primitive requirement. Build-phase code that walks `colors.<name>` would fail to find `colors.light.<name>`.
+4. **Build consumption:** `d2c-build` generates class names and CSS variable references, not literal color values. It does not need separate dark-mode values — the styling framework handles dark mode.
+
+If a project has custom dark-mode tokens that differ semantically from the light-mode equivalents (not just value overrides), document them in the `figma_variables.mismatches` section rather than nesting the `colors` object.
 
 ## `preferred_libraries` rules
 

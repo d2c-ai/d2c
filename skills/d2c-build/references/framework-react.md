@@ -113,3 +113,51 @@ All other components are Server Components by default in App Router. Pages Route
 | dnd                | `@dnd-kit/core`, `react-beautiful-dnd`                        |
 
 Rule: check `package.json` before importing. If a library from this table is already installed, use it. Never add a second library for the same category.
+
+---
+
+## Library Boundary Values (SVG Chart Libraries)
+
+Some libraries accept color/style values as string props, not CSS classes or variables. SVG-based chart libraries (recharts, @nivo/core, victory, d3) are the most common case — their `fill`, `stroke`, and `color` props require hex/rgb strings because the SVG renderer does not resolve CSS custom properties at the attribute level.
+
+**Pattern: Resolve CSS variables at runtime with `useMemo`.**
+
+Instead of hardcoding hex values directly, resolve design tokens from CSS variables so the single source of truth remains in your design system:
+
+```tsx
+"use client";
+
+import { useMemo } from "react";
+import { BarChart, Bar } from "recharts";
+
+function resolveTokenColor(tokenVar: string): string {
+  if (typeof window === "undefined") return "#000000";
+  return getComputedStyle(document.documentElement)
+    .getPropertyValue(tokenVar)
+    .trim() || "#000000";
+}
+
+function MyChart({ data }: { data: DataPoint[] }) {
+  const colors = useMemo(() => ({
+    primary: resolveTokenColor("--colors-primary"),
+    muted: resolveTokenColor("--colors-muted-foreground"),
+    border: resolveTokenColor("--colors-border"),
+  }), []);
+
+  return (
+    <BarChart data={data}>
+      {/* Token: colors.primary — resolved at runtime for SVG compatibility */}
+      <Bar dataKey="value" fill={colors.primary} />
+    </BarChart>
+  );
+}
+```
+
+**When `getComputedStyle` is not feasible** (SSR-only, data arrays, or when the token variable name is not known), hardcoding is acceptable but MUST include a comment linking the value to its token:
+
+```tsx
+// Token: colors.primary (#2563EB) — hardcoded for recharts SVG compatibility
+<Bar dataKey="value" fill="#2563EB" />
+```
+
+These values are **exempt from the Phase 5 hardcoded-values audit** (bucket A) because the library API requires them. The Phase 5 audit should skip values that appear inside SVG chart library props (`fill`, `stroke`, `color` on recharts/nivo/victory/d3 components) when they carry the `// Token:` comment.

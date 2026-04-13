@@ -112,3 +112,38 @@ Default: use `+page.server.ts` load functions. Never use `onMount` + `fetch` for
 | dnd                | `svelte-dnd-action`, `@dnd-kit/svelte`                          |
 
 Rule: check `package.json` before importing. If a library from this table is already installed, use it. Never add a second library for the same category.
+
+---
+
+## Library Boundary Values (SVG Chart Libraries)
+
+Some libraries accept color/style values as string props, not CSS classes or variables. SVG-based chart libraries (layercake, d3, pancake) require hex/rgb strings because the SVG renderer does not resolve CSS custom properties at the attribute level.
+
+**Pattern: Resolve CSS variables at runtime with `$state` + `$effect`.**
+
+```svelte
+<script>
+  let chartColors = $state({ primary: '#000000' })
+
+  function resolveTokenColor(tokenVar) {
+    return getComputedStyle(document.documentElement)
+      .getPropertyValue(tokenVar)
+      .trim() || '#000000'
+  }
+
+  $effect(() => {
+    chartColors = {
+      primary: resolveTokenColor('--colors-primary'),
+    }
+  })
+</script>
+```
+
+**When runtime resolution is not feasible**, hardcoding is acceptable but MUST include a comment linking the value to its token:
+
+```svelte
+<!-- Token: colors.primary (#2563EB) — hardcoded for SVG chart compatibility -->
+<rect fill="#2563EB" />
+```
+
+These values are **exempt from the Phase 5 hardcoded-values audit** (bucket A) because the library API requires them.

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://d2c.dev/ir/token-map.schema.json",
   "title": "d2c IR Token Map",
-  "description": "Model-authored file mapping Figma node IDs to per-property token references. Every value is a dotted path into design-tokens.json (e.g. 'colors.primary', 'spacing.md'). No hardcoded values permitted — unknown references must fail validation and trigger STOP AND ASK.",
+  "description": "Model-authored file mapping Figma node IDs to per-property token references. Every value is a dotted path into design-tokens.json (e.g. 'colors.primary', 'spacing.md') OR the special marker '__LIBRARY_BOUNDARY__:<token_path>:<hex_value>' for values that must be hardcoded due to library API limitations (e.g. SVG chart fill props). Unknown references must fail validation and trigger STOP AND ASK.",
   "type": "object",
   "required": ["schema_version", "nodes"],
   "properties": {
@@ -13,13 +13,13 @@
     },
     "nodes": {
       "type": "object",
-      "description": "Map of Figma node ID to a flat object of { cssPropertyOrSemanticName: dottedTokenPath }.",
+      "description": "Map of Figma node ID to a flat object of { cssPropertyOrSemanticName: dottedTokenPath | libraryBoundaryMarker }.",
       "additionalProperties": {
         "type": "object",
         "additionalProperties": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z0-9][a-z0-9_-]*)+$",
-          "description": "Dotted path into design-tokens.json. Lowercase; category.name or category.group.name."
+          "pattern": "^([a-z][a-z0-9_-]*(\\.[a-z0-9][a-z0-9_-]*)+|__LIBRARY_BOUNDARY__:[a-z][a-z0-9_.-]+:#[0-9a-fA-F]{3,8})$",
+          "description": "Dotted path into design-tokens.json (e.g. 'colors.primary'), OR library boundary marker '__LIBRARY_BOUNDARY__:<token_path>:<hex_value>' for values that cannot use CSS variables due to library API constraints (e.g. recharts SVG fill props). Boundary markers are exempt from the Phase 5 hardcoded-values audit."
         }
       }
     }

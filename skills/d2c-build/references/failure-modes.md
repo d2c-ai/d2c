@@ -56,6 +56,7 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 | P2-AMBIGUOUS-CHOSEN | 2 | stop-and-ask | Chosen is null — model could not decide |
 | P2-DEFERRED | 2 | stop-and-ask | Layout region uses unsupported layout mode |
 | P2-HASH-MISMATCH | 2 | auto-recover | Token file changed after IR was emitted |
+| P2-EMPTY-TOKEN-CATEGORY | 2 | stop-and-ask | Core token category (colors/spacing/typography) is empty |
 | P2-SOURCE-MISSING | 2 | stop-and-ask | Chosen component source file not on disk |
 | P2-MULTI-SUBTREE | 2 | stop-and-ask | Figma frame contains multiple unrelated subtrees |
 | P2-NO-MATCH | 2 | stop-and-ask | No component match above score threshold |
@@ -70,6 +71,7 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 | P4-PLAYWRIGHT-CRASH | 4 | auto-recover | Playwright error (non-connection) |
 | P4-PIXELDIFF-MISSING | 4 | inform | pixeldiff.js not found |
 | P4-PIXELDIFF-DEPS | 4 | auto-recover | pixelmatch or pngjs not installed |
+| P4-FIGMA-SCREENSHOT-UNSAVEABLE | 4 | inform | Figma screenshot cannot be saved to disk for pixeldiff |
 | P4-PLATEAU | 4 | conditional | Score plateau (< 1pp improvement) |
 | P4-IR-LOCK-CONFLICT | 4 | stop-and-ask | Fix requires changing a locked IR decision |
 | P4-FILE-OUT-OF-SCOPE | 4 | stop-and-ask | Fix requires editing an out-of-scope file |
@@ -275,6 +277,30 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 
 **Log line:**
 > "`design-tokens.json` changed after the IR was emitted (hash mismatch). Regenerating IR against the current tokens file."
+
+---
+
+### P2-EMPTY-TOKEN-CATEGORY — Core token category is empty
+
+- **Phase:** 2
+- **Tier:** stop-and-ask
+- **Trigger:** `validate-ir.js` reports that a core token category (`colors`, `spacing`, or `typography`) has zero entries. Error line matches: `"STOP AND ASK: token category"` + `"is empty"`.
+- **Action:** Halt. An empty core category means `d2c-init` did not extract tokens for it. Without tokens, the model will be forced to invent workarounds (e.g., using border-radius tokens as spacing gaps, hardcoding hex values). These workarounds produce semantically incorrect code.
+- **Max retries:** N/A
+- **Lock impact:** none (lock not yet written)
+- **Related rule:** Non-negotiable 3
+
+**User prompt:**
+> "Token category `{category}` is empty in `design-tokens.json`. Without {category} tokens, I cannot map Figma {category} values to your design system — I would have to hardcode them or misuse tokens from other categories.
+>
+> Options:
+> 1. **Run `/d2c-init --force`** to re-scan and populate {category} tokens, then re-run `/d2c-build`
+> 2. **Add tokens manually** — I'll list the {category} values from the Figma design so you can add them to `design-tokens.json`
+> 3. **Continue without {category} tokens** — I'll use Tailwind defaults (spacing) or hardcode values (colors/typography) and flag them in the audit
+>
+> Which?"
+
+**Anti-rationalization trap:** Do NOT reason that "Tailwind defaults are fine" or "the project doesn't use custom spacing." The purpose of tokens is to give the build a contract to validate against. Without tokens, validation is impossible and hardcoded values will silently drift from the design system.
 
 ---
 
@@ -565,6 +591,23 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 
 **Log line:**
 > "pixeldiff dependency missing: `{dependency}`. Installing and retrying."
+
+---
+
+### P4-FIGMA-SCREENSHOT-UNSAVEABLE — Figma screenshot cannot be saved to disk
+
+- **Phase:** 4
+- **Tier:** inform
+- **Trigger:** All methods for saving the Figma screenshot to disk have failed (download URL, base64 decode, save_to_disk parameter, Playwright Figma capture). The pixeldiff script requires both screenshots as PNG files on disk.
+- **Action:** Fall back to visual-only comparison (no pixeldiff numeric score). Log warning. **CRITICAL: The verification loop MUST still complete all `MAX_ROUNDS` rounds using visual-only comparison.** Do NOT skip rounds or exit early because pixeldiff is unavailable. Visual-only comparison is less precise but still catches layout, color, and spacing issues.
+- **Max retries:** N/A (all fallback methods already attempted per Step A.1)
+- **Lock impact:** none
+- **Related rule:** none
+
+**Log line:**
+> "Warning: Figma screenshot could not be saved to disk after trying all methods (download URL, base64, save_to_disk, Playwright). Falling back to visual-only comparison. Pixel-diff scoring will be unavailable — all {MAX_ROUNDS} rounds will use visual judgment only. Consider using a Figma personal access token with the REST API for future builds."
+
+**Anti-rationalization trap:** Do NOT use this as an excuse to run only 1 round. The visual comparison catches different issues than pixeldiff — layout misalignment, wrong colors, missing components. Each round gives the model a chance to fix issues and re-verify. All rounds are valuable even without a numeric score.
 
 ---
 

@@ -104,3 +104,39 @@ Standalone Vue 3 (Vite):
 - dnd: `vuedraggable`, `@vueuse/integrations` (useSortable)
 
 Rule: check `package.json` before importing. If a library from this table is already installed, use it. Never add a second library for the same category.
+
+---
+
+## Library Boundary Values (SVG Chart Libraries)
+
+Some libraries accept color/style values as string props, not CSS classes or variables. SVG-based chart libraries (vue-chartjs, @nivo/core, d3) require hex/rgb strings because the SVG renderer does not resolve CSS custom properties at the attribute level.
+
+**Pattern: Resolve CSS variables at runtime with `computed` + `onMounted`.**
+
+```vue
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+
+function resolveTokenColor(tokenVar: string): string {
+  return getComputedStyle(document.documentElement)
+    .getPropertyValue(tokenVar)
+    .trim() || '#000000'
+}
+
+const chartColors = ref({ primary: '#000000' })
+onMounted(() => {
+  chartColors.value = {
+    primary: resolveTokenColor('--colors-primary'),
+  }
+})
+</script>
+```
+
+**When runtime resolution is not feasible**, hardcoding is acceptable but MUST include a comment linking the value to its token:
+
+```vue
+<!-- Token: colors.primary (#2563EB) — hardcoded for SVG chart compatibility -->
+<Bar :fill="'#2563EB'" />
+```
+
+These values are **exempt from the Phase 5 hardcoded-values audit** (bucket A) because the library API requires them.

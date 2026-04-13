@@ -319,14 +319,42 @@ Wait for the user to respond. If the user says "go with recommendations" or simi
 
 ### Step 5f: Detect API-specific configuration
 
-After the user selects a preferred data fetching library, scan for its configuration:
+After the user selects a preferred data fetching library, scan for its configuration. Record ALL of the following fields in the `api` section of design-tokens.json:
 
-- **API base URL**: look for `axios.create({ baseURL })`, environment variables like `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_BASE_URL`, or similar.
-- **Query client setup**: if React Query or SWR, look for `QueryClientProvider`, `SWRConfig`, default options.
-- **API utility files**: look in `lib/api.ts`, `utils/api.ts`, `services/api.ts`, `api/index.ts`.
-- **Auth header injection**: interceptors, middleware, fetch wrappers.
+#### `config_path` — Path to the API config/setup file
 
-Record API-specific patterns using these exact enum values:
+Search for the primary API configuration file. Check these locations in order (first match wins):
+- For **React Query**: glob for `**/react-query*.ts`, `**/query-client*.ts`, `lib/**/api.ts`, `lib/**/client.ts`
+- For **SWR**: glob for `**/swr-config*.ts`, `**/swr*.ts`, `lib/**/fetcher.ts`
+- For **Axios**: glob for `lib/**/api.ts`, `utils/**/api.ts`, `services/**/api.ts`, `**/axios*.ts`
+- For **fetch (built-in)**: glob for `lib/**/api.ts`, `utils/**/api.ts`, `lib/**/fetch*.ts`
+- General fallback: `lib/api.ts`, `utils/api.ts`, `services/api.ts`, `api/index.ts`
+
+Record the path as `api.config_path`. If no config file is found, record `null`.
+
+#### `query_client_path` — Path to QueryClient/SWRConfig provider
+
+If React Query or SWR is the selected data fetching library, search for the provider component:
+- Glob for `**/providers/*query*.tsx`, `**/providers/*swr*.tsx`, `**/QueryProvider*.tsx`, `**/QueryClientProvider*.tsx`
+- Also check app layout files (`app/layout.tsx`, `pages/_app.tsx`) for inline QueryClientProvider/SWRConfig usage
+
+Record the path as `api.query_client_path`. If not using React Query/SWR, or no provider found, record `null`.
+
+#### `base_url_env` — API base URL environment variable
+
+Look for `axios.create({ baseURL })`, environment variables like `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_BASE_URL`, or similar. If the project uses relative API routes (e.g., Next.js `/api/` routes), record `null`.
+
+#### `auth_pattern` — Authentication approach
+
+Search for auth header injection patterns:
+- **Interceptors**: `axios.interceptors.request.use`, `fetch` wrappers adding `Authorization` headers
+- **Framework auth**: `next-auth`/`@auth0/*`/`@clerk/*` session middleware, `getServerSession`, `withApiAuthRequired`
+- **Manual headers**: `Authorization: Bearer` in fetch/axios calls
+
+Must be one of: `axios-interceptor`, `fetch-wrapper`, `next-auth-session`, `auth0-session`, `clerk-session`, `auth-header-manual`, `none-detected`. Match the actual auth library installed — do NOT guess. If the installed auth library is `@auth0/nextjs-auth0`, the pattern is `auth0-session`, not `next-auth-session`.
+
+#### `error_handling`, `loading_pattern`, `response_envelope`
+
 - **`error_handling`** — must be one of: `toast`, `error-boundary`, `inline-message`, `console-only`, `none-detected`. If multiple patterns coexist, use the one that appears in >50% of API call sites. If no pattern exceeds 50%, use `mixed` and note the top two.
 - **`loading_pattern`** — must be one of: `react-query-isLoading`, `swr-isLoading`, `suspense`, `useState-loading`, `skeleton-component`, `none-detected`. Same >50% rule applies.
 - **`response_envelope`** — search for a consistent wrapper object shape across 3+ API responses. Record the exact key names (e.g., `{ data, error, meta }`). If no consistent shape across 3+ responses, record `none-detected`.

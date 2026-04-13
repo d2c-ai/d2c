@@ -276,10 +276,30 @@ function validateSemantic(artifacts, tokens, tokensPath) {
   const validTokenPaths = flattenTokens(tokens);
 
   // token-map.json: every value must resolve to a valid token path.
+  // Values may be either a dotted token path (e.g., "colors.primary")
+  // or a __LIBRARY_BOUNDARY__ marker (e.g., "__LIBRARY_BOUNDARY__:colors.primary:#2563EB")
+  // which indicates the value must be hardcoded due to library API constraints.
   let tokenRefCount = 0;
+  let libraryBoundaryCount = 0;
   for (const [nodeId, props] of Object.entries(tokenMap.nodes || {})) {
     for (const [prop, tokenRef] of Object.entries(props || {})) {
       tokenRefCount++;
+
+      // Handle __LIBRARY_BOUNDARY__ markers: extract the embedded token path and validate it.
+      if (tokenRef.startsWith("__LIBRARY_BOUNDARY__:")) {
+        libraryBoundaryCount++;
+        const parts = tokenRef.split(":");
+        // Format: __LIBRARY_BOUNDARY__:<token_path>:<hex_value>
+        const embeddedTokenPath = parts[1];
+        if (embeddedTokenPath && !validTokenPaths.has(embeddedTokenPath)) {
+          const hint = formatDidYouMean(embeddedTokenPath, validTokenPaths);
+          errors.push(
+            `token-map.json:nodes["${nodeId}"].${prop} — library boundary marker references unknown token "${embeddedTokenPath}"${hint}`
+          );
+        }
+        continue;
+      }
+
       if (!validTokenPaths.has(tokenRef)) {
         const hint = formatDidYouMean(tokenRef, validTokenPaths);
         errors.push(
@@ -527,6 +547,56 @@ function validateLockSemantic(lock, componentMatch) {
 
 // ---------- Helpers: tokens, hashing, did-you-mean ----------
 
+/**
+ * Core token categories that MUST have at least one entry for a valid build.
+ * An empty core category means d2c-init did not extract tokens for that
+ * category — the model will invent workarounds (e.g., using border-radius
+ * as spacing) if we don't catch it here.
+ */
+const CORE_TOKEN_CATEGORIES = ["colors", "spacing", "typography"];
+
+/**
+ * Load and merge design-tokens.json, handling split_files mode.
+ *
+ * When `split_files: true`, the main file is a lightweight pointer with
+ * only `d2c_schema_version`, `split_files`, `framework`, `meta_framework`.
+ * The actual token data lives in four split files in the same directory.
+ * This function merges them into a single in-memory object.
+ *
+ * @param {string} tokensPath - path to design-tokens.json
+ * @returns {object} the merged tokens object
+ */
+function loadTokens(tokensPath) {
+  const raw = JSON.parse(fs.readFileSync(tokensPath, "utf-8"));
+
+  if (raw.split_files !== true) {
+    return raw;
+  }
+
+  // Split-file mode: merge the four split files into the pointer object.
+  const dir = path.dirname(tokensPath);
+  const splitFiles = [
+    "tokens-core.json",
+    "tokens-colors.json",
+    "tokens-components.json",
+    "tokens-conventions.json",
+  ];
+
+  const merged = { ...raw };
+  for (const name of splitFiles) {
+    const p = path.join(dir, name);
+    if (!fs.existsSync(p)) {
+      throw new Error(
+        `split_files=true but missing ${name} in ${dir}. Run /d2c-init to regenerate split files.`
+      );
+    }
+    const splitData = JSON.parse(fs.readFileSync(p, "utf-8"));
+    Object.assign(merged, splitData);
+  }
+
+  return merged;
+}
+
 function flattenTokens(tokens) {
   const paths = new Set();
   for (const cat of TOKEN_CATEGORIES) {
@@ -536,6 +606,29 @@ function flattenTokens(tokens) {
     }
   }
   return paths;
+}
+
+/**
+ * Check that core token categories (colors, spacing, typography) are
+ * non-empty. An empty core category means d2c-init did not populate it,
+ * and the model will be forced to invent workarounds or skip token mapping.
+ *
+ * Returns an array of warning/error strings. These are NOT added to the
+ * main errors array by default — the caller decides severity.
+ */
+function checkCoreTokenCategories(tokens) {
+  const warnings = [];
+  for (const cat of CORE_TOKEN_CATEGORIES) {
+    const node = tokens[cat];
+    if (!node || !isPlainObject(node) || Object.keys(node).length === 0) {
+      warnings.push(
+        `design-tokens.json:${cat} — STOP AND ASK: token category "${cat}" is empty. ` +
+        `The model cannot map Figma ${cat} values to tokens. ` +
+        `Run \`/d2c-init --force\` to populate, or manually add ${cat} tokens.`
+      );
+    }
+  }
+  return warnings;
 }
 
 function walkTokens(obj, prefix, out) {
@@ -746,11 +839,15 @@ function main(argv = process.argv.slice(2)) {
     } else {
       let tokens;
       try {
-        tokens = JSON.parse(fs.readFileSync(tokensPath, "utf-8"));
+        tokens = loadTokens(tokensPath);
       } catch (e) {
-        errors.push(`${tokensPath}: JSON parse error: ${e.message}`);
+        errors.push(`${tokensPath}: ${e.message}`);
       }
       if (tokens) {
+        // Check core token categories are non-empty before semantic validation.
+        const coreWarnings = checkCoreTokenCategories(tokens);
+        errors.push(...coreWarnings);
+
         const semantic = validateSemantic(artifacts, tokens, tokensPath);
         errors.push(...semantic.errors);
         nodeCount = semantic.nodeCount;
@@ -799,6 +896,8 @@ module.exports = {
   validateSemantic,
   validateLockSemantic,
   flattenTokens,
+  loadTokens,
+  checkCoreTokenCategories,
   computeTokensHash,
   levenshtein,
   didYouMean,

@@ -106,3 +106,37 @@ Always use `class`, NEVER `className`. Use `classList` for conditional classes. 
 | meta               | `@solidjs/meta`                                               |
 
 Rule: check `package.json` before importing. If a library from this table is already installed, use it. Never add a second library for the same category.
+
+---
+
+## Library Boundary Values (SVG Chart Libraries)
+
+Some libraries accept color/style values as string props, not CSS classes or variables. SVG-based chart libraries (solid-chartjs, d3) require hex/rgb strings because the SVG renderer does not resolve CSS custom properties at the attribute level.
+
+**Pattern: Resolve CSS variables at runtime with `createSignal` + `onMount`.**
+
+```tsx
+import { createSignal, onMount } from 'solid-js'
+
+function resolveTokenColor(tokenVar: string): string {
+  return getComputedStyle(document.documentElement)
+    .getPropertyValue(tokenVar)
+    .trim() || '#000000'
+}
+
+const [chartColors, setChartColors] = createSignal({ primary: '#000000' })
+onMount(() => {
+  setChartColors({
+    primary: resolveTokenColor('--colors-primary'),
+  })
+})
+```
+
+**When runtime resolution is not feasible**, hardcoding is acceptable but MUST include a comment linking the value to its token:
+
+```tsx
+// Token: colors.primary (#2563EB) — hardcoded for SVG chart compatibility
+<rect fill="#2563EB" />
+```
+
+These values are **exempt from the Phase 5 hardcoded-values audit** (bucket A) because the library API requires them.
