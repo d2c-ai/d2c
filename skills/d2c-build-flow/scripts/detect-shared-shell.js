@@ -14,7 +14,20 @@
  *       {
  *         node_id: "1:2",
  *         top_level_children: [
- *           { component_id: "abc:123", name: "OnboardingShell" },
+ *           {
+ *             component_id: "abc:123",
+ *             name: "OnboardingShell",
+ *             node_id: "9:10",                 // optional — instance node id on this page
+ *             descendants: [                   // optional — nested instances for stepper-indicator detection
+ *               {
+ *                 component_id: "abc:124",
+ *                 name: "StepIndicator",
+ *                 node_id: "9:11",
+ *                 variant: "step=1"
+ *               },
+ *               ...
+ *             ]
+ *           },
  *           ...
  *         ]
  *       },
@@ -29,7 +42,18 @@
  *       {
  *         name: "OnboardingShell",          // PascalCase, derived from component name
  *         component_id: "abc:123",
- *         applies_to: ["1:2", "3:4", ...]
+ *         applies_to: ["1:2", "3:4", ...],
+ *         shell_node_ids_per_page: {        // instance node ids of the shell on each page
+ *           "1:2": "9:10",
+ *           "3:4": "9:20"
+ *         },
+ *         stepper_indicator: null | {
+ *           component_id: "abc:124",
+ *           name: "StepIndicator",
+ *           node_ids_per_page: { "1:2": "9:11", "3:4": "9:21" },
+ *           variants_per_page: { "1:2": "step=1", "3:4": "step=2" },
+ *           ordered: true                   // true when the variant values across pages form an increasing sequence
+ *         }
  *       }
  *     ],
  *     divergent: false                      // true when no component meets threshold
@@ -76,7 +100,7 @@ function detectSharedShell({ pages, threshold = DEFAULT_THRESHOLD } = {}) {
   const total = pages.length;
   const minMatches = Math.ceil(threshold * total);
 
-  // { component_id: { name, pages: Set<node_id>, firstSeen: index } }
+  // { component_id: { name, pages: Set<node_id>, firstSeen: index, nodeByPage: Map<page_node_id, child_node_id> } }
   const byComponent = new Map();
 
   pages.forEach((page, idx) => {
@@ -94,9 +118,14 @@ function detectSharedShell({ pages, threshold = DEFAULT_THRESHOLD } = {}) {
           name: child.name || child.component_id,
           pages: new Set(),
           firstSeen: idx,
+          nodeByPage: new Map(),
+          childByPage: new Map(),
         });
       }
-      byComponent.get(child.component_id).pages.add(page.node_id);
+      const entry = byComponent.get(child.component_id);
+      entry.pages.add(page.node_id);
+      if (child.node_id) entry.nodeByPage.set(page.node_id, child.node_id);
+      entry.childByPage.set(page.node_id, child);
     }
   });
 
@@ -121,16 +150,158 @@ function detectSharedShell({ pages, threshold = DEFAULT_THRESHOLD } = {}) {
     .map((p) => p.node_id)
     .filter((nodeId) => best.info.pages.has(nodeId));
 
+  const shell_node_ids_per_page = {};
+  for (const pageNodeId of appliesTo) {
+    if (best.info.nodeByPage.has(pageNodeId)) {
+      shell_node_ids_per_page[pageNodeId] = best.info.nodeByPage.get(pageNodeId);
+    }
+  }
+
+  const stepper_indicator = detectStepperIndicator(pages, best, appliesTo);
+
   return {
     layouts: [
       {
         name: toPascalCase(best.info.name),
         component_id: best.componentId,
         applies_to: appliesTo,
+        shell_node_ids_per_page,
+        stepper_indicator,
       },
     ],
     divergent: false,
   };
+}
+
+/**
+ * Within the shared shell found above, look for a repeated sub-instance whose
+ * variant differs per page in an ordered way — the hallmark of a stepper
+ * progress indicator ("step=1" → "step=2" → …). Returns a descriptor or null.
+ *
+ * Two sources of variant info are accepted on each descendant entry:
+ *   - `variant` — a string like "step=1" or "state=2/4"
+ *   - `properties` — an object whose values may include step/index/active keys
+ *
+ * We look for a component_id that appears inside the shell on every page where
+ * the shell itself appears, with distinct variant values across pages. When
+ * those values parse as integers (or form an a/b/c sequence) and the ordered
+ * set matches the page order, we mark it `ordered: true`.
+ */
+function detectStepperIndicator(pages, best, appliesTo) {
+  // component_id → { name, perPage: Map<page_node_id, {node_id, variant}> }
+  const descendantByComponent = new Map();
+
+  for (const pageNodeId of appliesTo) {
+    const child = best.info.childByPage.get(pageNodeId);
+    if (!child || !Array.isArray(child.descendants)) continue;
+    const seen = new Set();
+    for (const d of child.descendants) {
+      if (!d || typeof d.component_id !== "string") continue;
+      if (seen.has(d.component_id)) continue;
+      seen.add(d.component_id);
+      if (!descendantByComponent.has(d.component_id)) {
+        descendantByComponent.set(d.component_id, {
+          name: d.name || d.component_id,
+          perPage: new Map(),
+        });
+      }
+      descendantByComponent.get(d.component_id).perPage.set(pageNodeId, {
+        node_id: d.node_id || null,
+        variant: extractVariantSignal(d),
+      });
+    }
+  }
+
+  // Pick the descendant whose variant signal is distinct per page and ordered
+  // in page order. If multiple candidates, prefer the one whose name looks
+  // stepper-like (contains "step" or "progress") then first-appearance.
+  let indicator = null;
+  for (const [componentId, entry] of descendantByComponent.entries()) {
+    if (entry.perPage.size !== appliesTo.length) continue; // must appear on every page the shell does
+    const variants = appliesTo.map((p) => entry.perPage.get(p).variant);
+    if (variants.some((v) => v === null || v === undefined)) continue;
+    const distinctCount = new Set(variants).size;
+    if (distinctCount < 2) continue;
+    const ordered = isOrderedSequence(variants);
+    const nameHint = /step|progress|indicator|wizard/i.test(entry.name);
+    const score = (ordered ? 2 : 0) + (nameHint ? 1 : 0) + (distinctCount === appliesTo.length ? 1 : 0);
+    if (!indicator || score > indicator.score) {
+      indicator = {
+        componentId,
+        entry,
+        score,
+        ordered,
+        variants,
+      };
+    }
+  }
+
+  if (!indicator) return null;
+
+  const node_ids_per_page = {};
+  const variants_per_page = {};
+  for (const pageNodeId of appliesTo) {
+    const v = indicator.entry.perPage.get(pageNodeId);
+    if (v && v.node_id) node_ids_per_page[pageNodeId] = v.node_id;
+    if (v) variants_per_page[pageNodeId] = v.variant;
+  }
+
+  return {
+    component_id: indicator.componentId,
+    name: indicator.entry.name,
+    node_ids_per_page,
+    variants_per_page,
+    ordered: indicator.ordered,
+  };
+}
+
+function extractVariantSignal(descendant) {
+  if (typeof descendant.variant === "string" && descendant.variant.length > 0) {
+    return descendant.variant;
+  }
+  const props = descendant.properties;
+  if (props && typeof props === "object") {
+    // Prefer step/index/current/active/state keys in that priority order.
+    const keys = ["step", "index", "current", "active", "state"];
+    for (const key of keys) {
+      if (props[key] !== undefined && props[key] !== null) {
+        return `${key}=${props[key]}`;
+      }
+    }
+    // Fall back to a stable JSON of whatever was provided.
+    try {
+      return JSON.stringify(props);
+    } catch (_e) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function isOrderedSequence(variants) {
+  // Extract trailing integer or letter from each value. If every one extracts
+  // and the sequence is strictly increasing by 1, mark ordered.
+  const nums = variants.map((v) => {
+    const m = /(\d+)\s*$/.exec(String(v));
+    return m ? parseInt(m[1], 10) : null;
+  });
+  if (nums.every((n) => n !== null)) {
+    for (let i = 1; i < nums.length; i++) {
+      if (nums[i] !== nums[i - 1] + 1) return false;
+    }
+    return true;
+  }
+  const letters = variants.map((v) => {
+    const m = /([A-Za-z])\s*$/.exec(String(v));
+    return m ? m[1].toLowerCase().charCodeAt(0) : null;
+  });
+  if (letters.every((c) => c !== null)) {
+    for (let i = 1; i < letters.length; i++) {
+      if (letters[i] !== letters[i - 1] + 1) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 function toPascalCase(raw) {

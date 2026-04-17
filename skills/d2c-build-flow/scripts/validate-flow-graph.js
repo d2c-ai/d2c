@@ -301,13 +301,19 @@ function validateSemantic(graph) {
   const edges = graph.edges || [];
   const isBranching = pages.some((p) => p.branch);
   const hasOverlays = pages.some((p) => (p.page_type ?? "page") === "overlay");
+  const hasSteppers = pages.some((p) => (p.page_type ?? "page") === "stepper_group");
   const hasLoops = edges.some((e) => e.is_loop === true);
   const hasConditions = edges.some((e) => e.condition);
   const hasNonNavigateActions = edges.some(
     (e) => e.action && e.action !== "navigate"
   );
   const isNonLinear =
-    isBranching || hasOverlays || hasLoops || hasConditions || hasNonNavigateActions;
+    isBranching ||
+    hasOverlays ||
+    hasSteppers ||
+    hasLoops ||
+    hasConditions ||
+    hasNonNavigateActions;
 
   if (!isNonLinear) {
     // Linear-only flows still carry the strict "one edge per consecutive pair
@@ -534,6 +540,186 @@ function validateSemantic(graph) {
     if (e.condition.kind === "state-equals" && e.condition.value === undefined) {
       errors.push(
         `edges[${i}].condition.value — 'state-equals' requires a value`
+      );
+    }
+  });
+
+  // Mode + stepper_groups invariants.
+  const mode = graph.mode;
+  const stepperGroups = graph.stepper_groups || [];
+
+  // Routes/hybrid flows must have at least 2 pages. This replaces the old
+  // pages.minItems=2 schema rule, which had to be relaxed to 1 so pure-stepper
+  // flows (a single virtual page_type='stepper_group' entry) can validate.
+  if ((mode === "routes" || mode === "hybrid") && pages.length < 2) {
+    errors.push(
+      `pages — mode '${mode}' requires at least 2 pages (minimum is 2), got ${pages.length}`
+    );
+  }
+
+  if (mode === "routes" && stepperGroups.length > 0) {
+    errors.push(
+      `mode — 'routes' forbids stepper_groups[], but found ${stepperGroups.length} group(s)`
+    );
+  }
+  if (mode === "stepper" && stepperGroups.length !== 1) {
+    errors.push(
+      `mode — 'stepper' requires exactly one stepper_groups[] entry, found ${stepperGroups.length}`
+    );
+  }
+  if (mode === "hybrid" && stepperGroups.length < 1) {
+    errors.push(
+      `mode — 'hybrid' requires at least one stepper_groups[] entry, found 0`
+    );
+  }
+  if (mode === "hybrid") {
+    const standalonePages = pages.filter(
+      (p) => (p.page_type ?? "page") === "page"
+    );
+    if (standalonePages.length < 1) {
+      errors.push(
+        `mode — 'hybrid' requires at least one page_type='page' alongside stepper groups; found only stepper virtual pages`
+      );
+    }
+  }
+
+  // mode_source + mode_confidence consistency.
+  if (graph.mode_source === "auto-detected") {
+    if (typeof graph.mode_confidence !== "number") {
+      errors.push(
+        `mode_confidence — required number when mode_source='auto-detected'`
+      );
+    } else if (graph.mode_confidence < 0.55) {
+      errors.push(
+        `mode_confidence — ${graph.mode_confidence} below abort threshold 0.55; detection should have aborted before this IR was written`
+      );
+    }
+  }
+
+  // stepper_groups[] invariants.
+  const stepperGroupNames = new Set();
+  const stepperGroupNodeIds = new Set();
+  const standaloneRoutes = new Set(
+    pages
+      .filter((p) => (p.page_type ?? "page") === "page" && p.route)
+      .map((p) => p.route)
+  );
+  stepperGroups.forEach((g, i) => {
+    if (!g || typeof g !== "object") return;
+    if (stepperGroupNames.has(g.name)) {
+      errors.push(
+        `stepper_groups[${i}].name — duplicate name "${g.name}"`
+      );
+    }
+    stepperGroupNames.add(g.name);
+
+    if (g.group_node_id) {
+      if (stepperGroupNodeIds.has(g.group_node_id)) {
+        errors.push(
+          `stepper_groups[${i}].group_node_id — duplicate id "${g.group_node_id}"`
+        );
+      }
+      stepperGroupNodeIds.add(g.group_node_id);
+      if (!nodeIdSet.has(g.group_node_id)) {
+        errors.push(
+          `stepper_groups[${i}].group_node_id — "${g.group_node_id}" not present in pages[].node_id`
+        );
+      } else {
+        const virtualPage = pages.find((p) => p.node_id === g.group_node_id);
+        if (virtualPage && (virtualPage.page_type ?? "page") !== "stepper_group") {
+          errors.push(
+            `stepper_groups[${i}].group_node_id — page "${g.group_node_id}" must be page_type='stepper_group', got "${virtualPage.page_type ?? "page"}"`
+          );
+        }
+        if (virtualPage && virtualPage.route !== g.route) {
+          errors.push(
+            `stepper_groups[${i}].route — "${g.route}" must equal pages[].route for the virtual page "${g.group_node_id}" (got "${virtualPage.route}")`
+          );
+        }
+        if (
+          virtualPage &&
+          virtualPage.stepper_group_ref &&
+          virtualPage.stepper_group_ref !== g.name
+        ) {
+          errors.push(
+            `pages[*].stepper_group_ref — virtual page for "${g.group_node_id}" references "${virtualPage.stepper_group_ref}" but stepper_groups[${i}].name is "${g.name}"`
+          );
+        }
+      }
+    }
+
+    if (g.route && standaloneRoutes.has(g.route)) {
+      errors.push(
+        `stepper_groups[${i}].route — "${g.route}" collides with a standalone page route`
+      );
+    }
+
+    // Steps: contiguous, 1-based, unique node_ids across all groups + pages.
+    const steps = Array.isArray(g.steps) ? g.steps : [];
+    steps.forEach((s, j) => {
+      if (s.order !== j + 1) {
+        errors.push(
+          `stepper_groups[${i}].steps[${j}].order — expected ${j + 1}, got ${s.order}`
+        );
+      }
+      if (nodeIdSet.has(s.node_id)) {
+        errors.push(
+          `stepper_groups[${i}].steps[${j}].node_id — "${s.node_id}" collides with pages[].node_id (stepper step frames must be distinct from page node ids)`
+        );
+      }
+      if (s.validate && s.validate !== "none" && s.validate !== "form") {
+        errors.push(
+          `stepper_groups[${i}].steps[${j}].validate — "${s.validate}" not in [none, form]`
+        );
+      }
+    });
+
+    // Step node_ids unique within the group.
+    const seenStepIds = new Set();
+    steps.forEach((s, j) => {
+      if (seenStepIds.has(s.node_id)) {
+        errors.push(
+          `stepper_groups[${i}].steps[${j}].node_id — duplicate "${s.node_id}" within the group`
+        );
+      }
+      seenStepIds.add(s.node_id);
+    });
+
+    // validation_enabled must reflect actual step validate values.
+    const declaredValidation = steps.some(
+      (s) => s.validate && s.validate !== "none"
+    );
+    if (g.validation_enabled !== declaredValidation) {
+      errors.push(
+        `stepper_groups[${i}].validation_enabled — expected ${declaredValidation} (derived from steps[].validate), got ${g.validation_enabled}`
+      );
+    }
+
+    // v1: branches[] must be empty, transition must be "none".
+    if (Array.isArray(g.branches) && g.branches.length > 0) {
+      errors.push(
+        `stepper_groups[${i}].branches — v1 does not support branching inside a stepper group (got ${g.branches.length} branch(es))`
+      );
+    }
+    if (g.transition && g.transition !== "none") {
+      errors.push(
+        `stepper_groups[${i}].transition — v1 only supports 'none' (got "${g.transition}")`
+      );
+    }
+  });
+
+  // Every stepper_group virtual page must back exactly one stepper_groups[] entry.
+  pages.forEach((p, i) => {
+    if ((p.page_type ?? "page") !== "stepper_group") return;
+    if (!p.stepper_group_ref) {
+      errors.push(
+        `pages[${i}].stepper_group_ref — page_type='stepper_group' requires a stepper_group_ref name`
+      );
+      return;
+    }
+    if (!stepperGroupNames.has(p.stepper_group_ref)) {
+      errors.push(
+        `pages[${i}].stepper_group_ref — "${p.stepper_group_ref}" not present in stepper_groups[].name`
       );
     }
   });

@@ -7,13 +7,37 @@
  *
  *   /d2c-build-flow
  *   In these following pages we need to build the following flow,
- *   this is the route /onboarding
+ *   this is the route /onboarding, mode: stepper
  *   These are the steps:
- *   Step 1: <figma-frame-url>
+ *   Step 1: <figma-frame-url>  title: "Email"
  *   Step 2: <figma-frame-url>  route: /signup/verify
  *
+ * Supported `mode:` values (preamble-level token):
+ *   auto     — default when the token is omitted; Phase 2a runs detect-mode.js
+ *              to pick routes/stepper/hybrid from Figma signals.
+ *   routes   — every step is its own URL (original behaviour).
+ *   stepper  — all steps share one URL, body swaps in place.
+ *   hybrid   — explicit `Stepper group "<name>" at <route>:` blocks intermix
+ *              with bare `Step N:` lines.
+ *
+ * Hybrid / stepper group grammar (indentation-sensitive):
+ *
+ *   Stepper group "intake" at /signup:
+ *     Step 1: <url>  title: "Name"
+ *     Step 2: <url>  title: "Email"  validate: form
+ *   Step: <url>  route: /signup/verify
+ *
+ * Per-step directives (Form A/B trailing tokens, in any order):
+ *   route:    explicit URL for this step (routes mode)
+ *   state:    comma-separated `name:type` pairs
+ *   mobile:   mobile variant URL
+ *   title:    human-readable stepper label (quoted or unquoted)
+ *   optional: true|false — stepper Skip button
+ *   validate: none|form   — Next gate
+ *
  * Produces an object describing base_route, parsed steps, resolved routes,
- * and a list of failure_ids matching the names in failure-modes.md:
+ * optional stepper groups, and a list of failure_ids matching the names in
+ * failure-modes.md:
  *
  *   F-FLOW-PARSE-AMBIGUOUS   step line did not match the grammar
  *   F-FLOW-STEP-GAP          step numbers are not contiguous from 1
@@ -21,6 +45,9 @@
  *   F-FLOW-NO-ROUTE          step has no route and no base_route
  *   F-FLOW-ROUTE-ESCAPES-BASE  explicit route is not under base_route (inform only)
  *   F-FLOW-TOO-FEW-STEPS     fewer than 2 step lines parsed
+ *   F-FLOW-MODE-UNKNOWN      mode: value was not auto|routes|stepper|hybrid
+ *   F-FLOW-STEPPER-GROUP-EMPTY  `Stepper group` block had <2 steps
+ *   F-FLOW-STEPPER-GROUP-DUP    two groups declared the same name
  *
  * This module is pure and deterministic; no IO, no Figma calls. Unit tests
  * drive every branch.
@@ -69,6 +96,24 @@ const STEP_DISCOVER_RE = /^\s*Step\s*[:\-]\s*(\S+)\s*$/i;
 // Route token in the preamble: first occurrence of `route /<path>`.
 const PREAMBLE_ROUTE_RE = /\broute\s+(\/\S+)/i;
 
+// Mode token: can appear anywhere in the preamble (including trailing the
+// route line, e.g. `this is the route /onboarding, mode: stepper`).
+// Permissive match — any word after `mode:`. Validity is checked against
+// ALLOWED_MODES below; unknown values emit F-FLOW-MODE-UNKNOWN.
+const MODE_DIRECTIVE_RE = /\bmode:\s*([A-Za-z_][A-Za-z0-9_-]*)\b/i;
+
+const ALLOWED_MODES = new Set(["auto", "routes", "stepper", "hybrid"]);
+
+// `Stepper group "name" at /route:` block header. Double- or single-quoted name.
+const STEPPER_GROUP_RE =
+  /^\s*Stepper\s+group\s+["']([^"']+)["']\s+at\s+(\/\S*?):\s*$/i;
+
+// Per-step `title:` directive. Supports quoted ("Email") and unquoted (single
+// word) values. Quoted values may contain spaces.
+const TITLE_DIRECTIVE_RE = /\btitle:\s*(?:"([^"]+)"|'([^']+)'|(\S+))/i;
+const OPTIONAL_DIRECTIVE_RE = /\boptional:\s*(true|false)\b/i;
+const VALIDATE_DIRECTIVE_RE = /\bvalidate:\s*(none|form)\b/i;
+
 // Figma URL must have a node-id query parameter to point at a specific frame.
 const FIGMA_NODE_ID_RE = /[?&]node-id=([A-Za-z0-9%:\-]+)/;
 
@@ -86,7 +131,10 @@ const FIGMA_FILE_KEY_RE = /figma\.com\/(?:design|file)\/([A-Za-z0-9]+)/i;
  *   base_route: string | null,
  *   flow_name: string | null,
  *   auto_discovered: boolean,
- *   steps: Array<{step_number: number, figma_url: string, node_id: string, route: string, route_source: 'explicit'|'derived'}>
+ *   mode: 'auto' | 'routes' | 'stepper' | 'hybrid',
+ *   mode_source: 'explicit' | 'default',
+ *   steps: Array<{step_number: number, figma_url: string, node_id: string, route: string, route_source: 'explicit'|'derived'}>,
+ *   stepper_groups: Array<{name: string, route: string, steps: Array<object>}>
  * }}
  */
 function parseFlowPrompt(promptText) {
@@ -103,26 +151,130 @@ function parseFlowPrompt(promptText) {
       base_route: null,
       flow_name: null,
       auto_discovered: false,
+      mode: "auto",
+      mode_source: "default",
       steps: [],
+      stepper_groups: [],
     };
   }
 
   const lines = promptText.split(/\r?\n/);
   const failures = [];
 
-  // Split the prompt at the first line matching the step-candidate regex.
-  let firstStepIdx = lines.findIndex((l) => STEP_CANDIDATE_RE.test(l));
-  if (firstStepIdx === -1) firstStepIdx = lines.length;
+  // Find the earliest anchor line that marks the start of the step section.
+  // That's either a step candidate OR a `Stepper group` block header, whichever
+  // comes first. Everything above is preamble (route, mode, prose).
+  let firstAnchorIdx = lines.findIndex(
+    (l) => STEP_CANDIDATE_RE.test(l) || STEPPER_GROUP_RE.test(l)
+  );
+  if (firstAnchorIdx === -1) firstAnchorIdx = lines.length;
 
-  const preamble = lines.slice(0, firstStepIdx).join("\n");
+  const preamble = lines.slice(0, firstAnchorIdx).join("\n");
   const base_route = extractBaseRoute(preamble);
 
+  // Mode: explicit `mode:` token in the preamble wins; default is 'auto'. Any
+  // other value is flagged F-FLOW-MODE-UNKNOWN so typos don't silently degrade
+  // to auto-detection.
+  const modeMatch = MODE_DIRECTIVE_RE.exec(preamble);
+  let mode = "auto";
+  let mode_source = "default";
+  if (modeMatch) {
+    const declared = modeMatch[1].toLowerCase();
+    if (ALLOWED_MODES.has(declared)) {
+      mode = declared;
+      mode_source = "explicit";
+    } else {
+      failures.push({
+        id: "F-FLOW-MODE-UNKNOWN",
+        severity: "error",
+        detail: { observed: modeMatch[1], allowed: [...ALLOWED_MODES] },
+      });
+    }
+  }
+  // Reject any `mode:` directive that appeared OUTSIDE the preamble (i.e. in
+  // the step section). The parser grammar only recognises mode as a
+  // preamble-level token; scattering it between Step lines is almost always
+  // a typo and would be silently ignored otherwise.
+  if (firstAnchorIdx < lines.length) {
+    const stepSection = lines.slice(firstAnchorIdx).join("\n");
+    // Strip trailing directives from Step lines so a `mode:` on a step line
+    // (which would be a typo) still surfaces — but accept `title:`, `optional:`,
+    // `validate:`, `route:`, `state:`, `mobile:` within trailing directives as
+    // scoped to that step.
+    if (!modeMatch && MODE_DIRECTIVE_RE.test(stepSection)) {
+      failures.push({
+        id: "F-FLOW-MODE-UNKNOWN",
+        severity: "error",
+        detail: {
+          reason:
+            "`mode:` appeared after the step section; declare it in the preamble (e.g. `route /onboarding, mode: stepper`)",
+        },
+      });
+    }
+  }
+
   // Collect step candidates and parse them strictly.
-  // Each element: { lineIdx, raw, match, parsed: {step_number, figma_url, route_explicit} | null, form: 'A' | 'C' | null }
+  // Each element: { lineIdx, raw, match, parsed: {step_number, figma_url, route_explicit} | null, form: 'A' | 'C' | null, group_name: string | null }
   const rawSteps = [];
-  for (let i = firstStepIdx; i < lines.length; i++) {
+  // Track the current Stepper group: steps in subsequent indented lines belong
+  // to it until we hit another Stepper group header OR an unindented step OR a
+  // blank line followed by an unindented step. We use indentation as the
+  // grouping signal: lines indented more than the Stepper group header are
+  // in-group.
+  const stepperGroupsDecl = []; // { name, route, startLineIdx, headerIndent }
+  const seenGroupNames = new Set();
+  let currentGroup = null;
+
+  for (let i = firstAnchorIdx; i < lines.length; i++) {
     const line = lines[i];
-    if (!STEP_CANDIDATE_RE.test(line)) continue;
+    const headerMatch = STEPPER_GROUP_RE.exec(line);
+    if (headerMatch) {
+      const name = headerMatch[1];
+      const route = headerMatch[2];
+      if (seenGroupNames.has(name)) {
+        failures.push({
+          id: "F-FLOW-STEPPER-GROUP-DUP",
+          severity: "error",
+          detail: { name, line_number: i + 1 },
+        });
+      }
+      seenGroupNames.add(name);
+      const headerIndent = line.match(/^\s*/)[0].length;
+      currentGroup = { name, route, headerIndent, stepCount: 0 };
+      stepperGroupsDecl.push({
+        name,
+        route,
+        startLineIdx: i,
+        headerIndent,
+      });
+      continue;
+    }
+
+    if (!STEP_CANDIDATE_RE.test(line)) {
+      // If we're in a stepper group and hit a non-step, non-empty, non-indented
+      // line, that closes the group. Blank lines are permissive (keep the
+      // group open).
+      if (currentGroup !== null && line.trim() !== "") {
+        const thisIndent = line.match(/^\s*/)[0].length;
+        if (thisIndent <= currentGroup.headerIndent) {
+          currentGroup = null;
+        }
+      }
+      continue;
+    }
+
+    // Step line: check if it belongs to the current stepper group by indent.
+    let assignedGroup = null;
+    if (currentGroup !== null) {
+      const thisIndent = line.match(/^\s*/)[0].length;
+      if (thisIndent > currentGroup.headerIndent) {
+        assignedGroup = currentGroup.name;
+        currentGroup.stepCount += 1;
+      } else {
+        // Less-or-equal indent than header → leaves the group.
+        currentGroup = null;
+      }
+    }
 
     const strict = STEP_STRICT_RE.exec(line);
     if (strict) {
@@ -138,7 +290,14 @@ function parseFlowPrompt(promptText) {
           severity: "error",
           detail: { line_number: i + 1, line, ...directives.error.detail },
         });
-        rawSteps.push({ lineIdx: i, raw: line, match: strict, parsed: null, form: "A" });
+        rawSteps.push({
+          lineIdx: i,
+          raw: line,
+          match: strict,
+          parsed: null,
+          form: "A",
+          group_name: assignedGroup,
+        });
         continue;
       }
 
@@ -153,8 +312,12 @@ function parseFlowPrompt(promptText) {
           route_explicit: directives.route,
           state_writes: directives.state_writes,
           mobile_url: directives.mobile_url || null,
+          title: directives.title || null,
+          optional: directives.optional,
+          validate: directives.validate || null,
         },
         form: "A",
+        group_name: assignedGroup,
       });
       continue;
     }
@@ -167,6 +330,7 @@ function parseFlowPrompt(promptText) {
         match: discover,
         parsed: { figma_url: discover[1] },
         form: "C",
+        group_name: assignedGroup,
       });
       continue;
     }
@@ -176,7 +340,14 @@ function parseFlowPrompt(promptText) {
       severity: "error",
       detail: { line_number: i + 1, line },
     });
-    rawSteps.push({ lineIdx: i, raw: line, match: null, parsed: null, form: null });
+    rawSteps.push({
+      lineIdx: i,
+      raw: line,
+      match: null,
+      parsed: null,
+      form: null,
+      group_name: assignedGroup,
+    });
   }
 
   // Detect Form C — exactly one step line, discover form, no Form A lines present.
@@ -210,7 +381,11 @@ function parseFlowPrompt(promptText) {
 
   // Form A steps carry their own step_number. For Form C we synthesise a
   // single step_number=1 entry so downstream consumers see the same shape.
+  // Stepper-group-scoped steps are partitioned out of the top-level parsedSteps
+  // array and tracked separately for per-group contiguity validation and for
+  // emission in the returned `stepper_groups[]`.
   let parsedSteps;
+  const groupedRawByName = {}; // { name: Array<{parsed, lineIdx}> }
   if (auto_discovered) {
     const entry = rawSteps.find((s) => s.form === "C").parsed;
     parsedSteps = [
@@ -222,9 +397,93 @@ function parseFlowPrompt(promptText) {
       },
     ];
   } else {
-    parsedSteps = rawSteps
-      .filter((s) => s.parsed !== null && s.form === "A")
-      .map((s) => s.parsed);
+    parsedSteps = [];
+    for (const s of rawSteps) {
+      if (s.parsed === null || s.form !== "A") continue;
+      if (s.group_name) {
+        if (!groupedRawByName[s.group_name]) groupedRawByName[s.group_name] = [];
+        groupedRawByName[s.group_name].push({ parsed: s.parsed, lineIdx: s.lineIdx });
+      } else {
+        parsedSteps.push(s.parsed);
+      }
+    }
+  }
+
+  // Per-group contiguity check: step_number inside a group must be 1-based
+  // contiguous. Branching inside a stepper group is explicitly not supported
+  // in v1 (schema.stepper_group.branches[] is a forward-compat placeholder).
+  for (const [groupName, items] of Object.entries(groupedRawByName)) {
+    if (items.length < 2) {
+      failures.push({
+        id: "F-FLOW-STEPPER-GROUP-EMPTY",
+        severity: "error",
+        detail: {
+          name: groupName,
+          count: items.length,
+          reason: "`Stepper group` blocks must contain at least 2 Step lines",
+        },
+      });
+    }
+    items.forEach((it, idx) => {
+      const expected = idx + 1;
+      if (it.parsed.step_number !== expected) {
+        failures.push({
+          id: "F-FLOW-STEP-GAP",
+          severity: "error",
+          detail: {
+            group: groupName,
+            observed: items.map((x) => x.parsed.step_number),
+            expected_prefix: items.map((_, i) => i + 1),
+            reason:
+              "Step numbers inside a Stepper group must be 1-based contiguous",
+          },
+        });
+      }
+      if (it.parsed.branch) {
+        failures.push({
+          id: "F-FLOW-STEPPER-GROUP-EMPTY",
+          severity: "error",
+          detail: {
+            group: groupName,
+            step_number: it.parsed.step_number,
+            branch: it.parsed.branch,
+            reason:
+              "Stepper groups do not support branching in v1 (step " +
+              it.parsed.step_number +
+              it.parsed.branch +
+              ")",
+          },
+        });
+      }
+    });
+  }
+
+  // Mode-vs-declaration consistency:
+  //   - mode=routes forbids `Stepper group` blocks (user asked for route-per-step).
+  //   - mode=hybrid requires at least one `Stepper group` block.
+  //   - mode=stepper is allowed with OR without explicit groups; when no groups
+  //     are declared, Phase 2a synthesises one group containing all top-level
+  //     steps (this keeps the simple "all-stepper" prompt short).
+  const declaredGroupCount = Object.keys(groupedRawByName).length;
+  if (mode === "routes" && declaredGroupCount > 0) {
+    failures.push({
+      id: "F-FLOW-MODE-UNKNOWN",
+      severity: "error",
+      detail: {
+        reason:
+          "`mode: routes` forbids `Stepper group` blocks — use `mode: hybrid` to mix both, or `mode: stepper`/omit for all-stepper.",
+      },
+    });
+  }
+  if (mode === "hybrid" && declaredGroupCount === 0) {
+    failures.push({
+      id: "F-FLOW-MODE-UNKNOWN",
+      severity: "error",
+      detail: {
+        reason:
+          "`mode: hybrid` requires at least one `Stepper group \"<name>\" at <route>:` block in the prompt.",
+      },
+    });
   }
 
   // Too few steps? Only applies to Form A. Form C deliberately starts with one
@@ -431,6 +690,55 @@ function parseFlowPrompt(promptText) {
     }
   }
 
+  // Resolve stepper-group steps. Each group's steps carry explicit titles,
+  // optional/validate flags, and group-scoped routes (all steps in a group
+  // share the group's `route`).
+  const resolved_stepper_groups = [];
+  for (const { name, route: groupRoute, startLineIdx } of stepperGroupsDecl) {
+    const items = groupedRawByName[name] || [];
+    if (items.length === 0) continue;
+    const steps = [];
+    for (let i = 0; i < items.length; i++) {
+      const p = items[i].parsed;
+      const nodeIdMatch = FIGMA_NODE_ID_RE.exec(p.figma_url);
+      const node_id = nodeIdMatch
+        ? decodeURIComponent(nodeIdMatch[1]).replace(/-/g, ":")
+        : null;
+      if (!node_id) {
+        failures.push({
+          id: "F-FLOW-FILE-URL",
+          severity: "error",
+          detail: {
+            step_number: p.step_number,
+            url: p.figma_url,
+            group: name,
+          },
+        });
+      }
+      const fileKeyMatch = FIGMA_FILE_KEY_RE.exec(p.figma_url);
+      steps.push({
+        order: i + 1,
+        step_number: p.step_number,
+        figma_url: p.figma_url,
+        node_id,
+        file_key: fileKeyMatch ? fileKeyMatch[1] : null,
+        title: p.title || null,
+        optional: p.optional === true,
+        validate: p.validate || "none",
+        state_writes:
+          p.state_writes && p.state_writes.length > 0 ? p.state_writes : null,
+      });
+    }
+    resolved_stepper_groups.push({
+      name: toPascalCase(name),
+      raw_name: name,
+      route: groupRoute,
+      header_line: startLineIdx + 1,
+      validation_enabled: steps.some((s) => s.validate === "form"),
+      steps,
+    });
+  }
+
   const flow_name = deriveFlowName(base_route);
   const hasError = failures.some((f) => f.severity === "error");
 
@@ -441,6 +749,11 @@ function parseFlowPrompt(promptText) {
   for (const s of resolvedSteps) {
     if (s.file_key && !fileKeys.includes(s.file_key)) fileKeys.push(s.file_key);
   }
+  for (const g of resolved_stepper_groups) {
+    for (const s of g.steps) {
+      if (s.file_key && !fileKeys.includes(s.file_key)) fileKeys.push(s.file_key);
+    }
+  }
   const cross_file = fileKeys.length > 1;
 
   return {
@@ -449,10 +762,24 @@ function parseFlowPrompt(promptText) {
     base_route,
     flow_name,
     auto_discovered,
+    mode,
+    mode_source,
     cross_file,
     file_keys: fileKeys,
     steps: resolvedSteps,
+    stepper_groups: resolved_stepper_groups,
   };
+}
+
+function toPascalCase(raw) {
+  if (!raw) return "Stepper";
+  return (
+    String(raw)
+      .split(/[^A-Za-z0-9]+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join("") || "Stepper"
+  );
 }
 
 /**
@@ -468,11 +795,23 @@ function parseFlowPrompt(promptText) {
  * }}
  */
 function parseStepDirectives(trailing) {
-  if (!trailing) return { error: null, route: null, state_writes: null, mobile_url: null };
+  const empty = {
+    error: null,
+    route: null,
+    state_writes: null,
+    mobile_url: null,
+    title: null,
+    optional: false,
+    validate: null,
+  };
+  if (!trailing) return empty;
 
   let route = null;
   let stateRaw = null;
   let mobile_url = null;
+  let title = null;
+  let optional = false;
+  let validate = null;
   let remainder = trailing;
 
   const routeMatch = ROUTE_DIRECTIVE_RE.exec(remainder);
@@ -485,6 +824,24 @@ function parseStepDirectives(trailing) {
   if (mobileMatch) {
     mobile_url = mobileMatch[1];
     remainder = remainder.replace(mobileMatch[0], "").trim();
+  }
+
+  const titleMatch = TITLE_DIRECTIVE_RE.exec(remainder);
+  if (titleMatch) {
+    title = titleMatch[1] || titleMatch[2] || titleMatch[3] || null;
+    remainder = remainder.replace(titleMatch[0], "").trim();
+  }
+
+  const optionalMatch = OPTIONAL_DIRECTIVE_RE.exec(remainder);
+  if (optionalMatch) {
+    optional = optionalMatch[1].toLowerCase() === "true";
+    remainder = remainder.replace(optionalMatch[0], "").trim();
+  }
+
+  const validateMatch = VALIDATE_DIRECTIVE_RE.exec(remainder);
+  if (validateMatch) {
+    validate = validateMatch[1].toLowerCase();
+    remainder = remainder.replace(validateMatch[0], "").trim();
   }
 
   const stateMatch = /\bstate:\s*(.*)$/i.exec(remainder);
@@ -504,6 +861,9 @@ function parseStepDirectives(trailing) {
       route,
       state_writes: null,
       mobile_url,
+      title,
+      optional,
+      validate,
     };
   }
 
@@ -531,6 +891,10 @@ function parseStepDirectives(trailing) {
         },
         route,
         state_writes: null,
+        mobile_url,
+        title,
+        optional,
+        validate,
       };
     }
     if (parsed.length === 0) {
@@ -541,12 +905,24 @@ function parseStepDirectives(trailing) {
         },
         route,
         state_writes: null,
+        mobile_url,
+        title,
+        optional,
+        validate,
       };
     }
     state_writes = parsed;
   }
 
-  return { error: null, route, state_writes, mobile_url };
+  return {
+    error: null,
+    route,
+    state_writes,
+    mobile_url,
+    title,
+    optional,
+    validate,
+  };
 }
 
 function extractBaseRoute(preamble) {

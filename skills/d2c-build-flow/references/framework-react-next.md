@@ -628,3 +628,300 @@ Rules:
 - Iterate `edges[]` filtered by `from_node_id === <this page's node_id>`. Codegen's outgoing-edge loop here replaces the single-target `link_target` handling used in linear flows.
 - Every branch MUST resolve to a distinct Figma component — the validator enforces non-null `source_component_node_id` for every outgoing edge of a branch page. If the wiring was manual, the author needs to provide the id before Phase 3.
 - Navigation smoke test: emit **one click-level assertion per outgoing edge** (not per page). See §"Navigation smoke test" for the generator shape.
+
+---
+
+## Stepper groups (single-route multi-step)
+
+When `flow-graph.stepper_groups[]` contains one or more entries, each group renders as a **single-route stepper**: one URL, one shared shell (header + progress indicator + footer), and the body swaps in place as the user clicks Next/Back. No route change between steps; history entries per step so browser-back undoes a step.
+
+Fires when `flow-graph.mode === "stepper"` (whole flow is one group) or `"hybrid"` (groups mixed with standalone routes).
+
+### Output shape
+
+For `stepper_groups[0] = { name: "Onboarding", route: "/onboarding", steps: [{ title: "Email" }, { title: "Verify" }, { title: "Profile" }], validation_enabled: false, persistence: "session" }`:
+
+```
+app/
+  onboarding/
+    page.tsx                         # the stepper page — lives at the group's route
+    _steps/
+      StepEmail.tsx                  # one file per stepper step (named by title)
+      StepVerify.tsx
+      StepProfile.tsx
+    _state/
+      OnboardingContext.tsx          # provider owning currentStep + shared form state
+    _components/                     # existing — any stepper-specific shared bits
+```
+
+For `mode: hybrid` the stepper group coexists with standalone `page.tsx` files under sibling or nested routes (e.g. `app/signup/page.tsx` + `app/signup/verify/page.tsx`).
+
+### State provider
+
+The stepper provider extends the existing shared-state shape with `currentStep` and, when `validation_enabled: true`, per-step validity flags. Persistence mirrors [§Shared state provider](#shared-state-provider-_statesflownamecontexttsx) — emit `useState` when `validation_enabled: false`, `useReducer` when `true`.
+
+```tsx
+// app/onboarding/_state/OnboardingContext.tsx
+"use client";
+
+import { createContext, useContext, useReducer, useState, useEffect, ReactNode } from "react";
+
+type OnboardingData = {
+  email: string;
+  name: string;
+  // …fields from stepper_groups[0].steps[*].state_writes
+};
+
+type OnboardingCtx = {
+  data: OnboardingData;
+  currentStep: number;
+  totalSteps: number;
+  setField<K extends keyof OnboardingData>(key: K, value: OnboardingData[K]): void;
+  next(): void;
+  back(): void;
+  goTo(index: number): void;
+  reset(): void;
+  stepValidity: boolean[];        // only when validation_enabled
+  markStepValid(i: number, valid: boolean): void; // only when validation_enabled
+};
+
+const Ctx = createContext<OnboardingCtx | null>(null);
+
+// session-persistence example — same pattern as the non-stepper provider.
+const STORAGE_KEY = "d2c.onboarding";
+const TOTAL_STEPS = 3;
+
+export function OnboardingProvider({ children }: { children: ReactNode }) {
+  const [data, setData] = useState<OnboardingData>(() => {
+    if (typeof window === "undefined") return { email: "", name: "" };
+    try {
+      const raw = window.sessionStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : { email: "", name: "" };
+    } catch {
+      return { email: "", name: "" };
+    }
+  });
+  const [currentStep, setCurrentStep] = useState<number>(() => {
+    if (typeof window === "undefined") return 0;
+    const raw = window.sessionStorage.getItem(STORAGE_KEY + ":step");
+    return raw ? Math.min(parseInt(raw, 10) || 0, TOTAL_STEPS - 1) : 0;
+  });
+
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch {}
+  }, [data]);
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(STORAGE_KEY + ":step", String(currentStep));
+    } catch {}
+  }, [currentStep]);
+
+  function setField<K extends keyof OnboardingData>(key: K, value: OnboardingData[K]) {
+    setData((d) => ({ ...d, [key]: value }));
+  }
+  function goTo(index: number) {
+    const clamped = Math.max(0, Math.min(TOTAL_STEPS - 1, index));
+    setCurrentStep(clamped);
+    // Browser history entry per step — browser-back undoes a step.
+    window.history.pushState({ step: clamped }, "", window.location.pathname);
+  }
+  function next() { goTo(currentStep + 1); }
+  function back() { goTo(currentStep - 1); }
+  function reset() { setData({ email: "", name: "" }); setCurrentStep(0); }
+
+  return (
+    <Ctx.Provider
+      value={{
+        data,
+        currentStep,
+        totalSteps: TOTAL_STEPS,
+        setField,
+        next,
+        back,
+        goTo,
+        reset,
+        stepValidity: [],            // expand when validation_enabled=true
+        markStepValid: () => {},
+      }}
+    >
+      {children}
+    </Ctx.Provider>
+  );
+}
+
+export function useOnboarding() {
+  const ctx = useContext(Ctx);
+  if (!ctx) throw new Error("useOnboarding must be used inside OnboardingProvider");
+  return ctx;
+}
+```
+
+When `validation_enabled: true`, swap `useState` for a `useReducer` with actions `SET_FIELD`, `SET_VALID`, `NEXT`, `BACK`, `GOTO`, `RESET`. Next() must refuse to advance when `stepValidity[currentStep] !== true`.
+
+### Page file
+
+```tsx
+// app/onboarding/page.tsx
+"use client";
+
+import { useEffect } from "react";
+import { OnboardingProvider, useOnboarding } from "./_state/OnboardingContext";
+import StepEmail from "./_steps/StepEmail";
+import StepVerify from "./_steps/StepVerify";
+import StepProfile from "./_steps/StepProfile";
+// Shared shell component — detected via flow-graph.stepper_groups[0].shell_component_node_id
+import OnboardingShell from "@/components/OnboardingShell";
+
+const STEP_TITLES = ["Email", "Verify", "Profile"];
+
+function OnboardingStepperBody() {
+  const { currentStep, totalSteps, next, back, goTo } = useOnboarding();
+
+  // browser-back: intercept popstate to update step instead of leaving the flow.
+  useEffect(() => {
+    function onPop(e: PopStateEvent) {
+      const step = e.state && typeof e.state.step === "number" ? e.state.step : 0;
+      if (step < currentStep) back();
+    }
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [currentStep, back]);
+
+  // Focus the first focusable element inside the body region each time the
+  // step advances. Screen readers announce the new step.
+  useEffect(() => {
+    const body = document.querySelector<HTMLElement>("[data-stepper-body]");
+    if (!body) return;
+    const focusable = body.querySelector<HTMLElement>(
+      "input, select, textarea, button, [tabindex]:not([tabindex='-1'])"
+    );
+    focusable?.focus();
+  }, [currentStep]);
+
+  const stepContent = [
+    <StepEmail key="email" />,
+    <StepVerify key="verify" />,
+    <StepProfile key="profile" />,
+  ][currentStep];
+
+  return (
+    <OnboardingShell
+      currentStep={currentStep}
+      totalSteps={totalSteps}
+      stepTitles={STEP_TITLES}
+    >
+      <div
+        role="region"
+        aria-labelledby={`stepper-title-${currentStep}`}
+        data-stepper-body
+      >
+        <h2 id={`stepper-title-${currentStep}`} className="sr-only">
+          Step {currentStep + 1} of {totalSteps}: {STEP_TITLES[currentStep]}
+        </h2>
+        {stepContent}
+      </div>
+
+      <div className="stepper-footer">
+        <button type="button" onClick={back} disabled={currentStep === 0}>
+          Back
+        </button>
+        <button type="button" onClick={next}>
+          {currentStep === totalSteps - 1 ? "Finish" : "Next"}
+        </button>
+      </div>
+    </OnboardingShell>
+  );
+}
+
+export default function OnboardingPage() {
+  return (
+    <OnboardingProvider>
+      <OnboardingStepperBody />
+    </OnboardingProvider>
+  );
+}
+```
+
+Where the shell component `OnboardingShell` reads `flow-graph.stepper_groups[0].stepper_indicator.variants_per_page` so the progress-indicator node renders the correct variant at each step. When no indicator component was detected, the fallback renders a plain `Step N of M` text label that honours `aria-current="step"` on the active item.
+
+### Step components
+
+Each `_steps/Step<Title>.tsx` is its own component. Wire form fields to `useOnboarding().setField(key, value)` and, when the step has `validate: form`, call `markStepValid(currentStep, <boolean>)` on every field change.
+
+```tsx
+// app/onboarding/_steps/StepEmail.tsx
+"use client";
+
+import { useOnboarding } from "../_state/OnboardingContext";
+
+export default function StepEmail() {
+  const { data, setField } = useOnboarding();
+  return (
+    <form>
+      <label>
+        Email
+        <input
+          type="email"
+          value={data.email}
+          onChange={(e) => setField("email", e.target.value)}
+        />
+      </label>
+    </form>
+  );
+}
+```
+
+### Next/Back wiring via `pick-link-target.js`
+
+For each step, Phase 2b calls `pick-link-target` with `stepDelta: +1` (Next button) and `stepDelta: -1` (Back button). The returned `edge_kind === "step_delta"` tells codegen to wire the button's `onClick` to `next()` / `back()` from the provider — not to `router.push`.
+
+Edge-kind dispatch in codegen is a one-liner per button:
+
+```tsx
+if (link_target.edge_kind === "step_delta") {
+  // stepper-internal edge
+  return <Button onClick={link_target.step_delta > 0 ? next : back}>{label}</Button>;
+}
+// route edge — leaves the stepper
+return <Button onClick={() => router.push(link_target.route)}>{label}</Button>;
+```
+
+### Accessibility contract (non-optional)
+
+Every stepper output MUST:
+1. Set `aria-current="step"` on the active indicator element inside the shell.
+2. Wrap the swappable body in `role="region"` with `aria-labelledby` pointing at a per-step heading that includes the step index and total.
+3. Move focus to the first focusable element inside the body on each step change.
+4. Provide a visible "Step N of M" label (text, not colour-only).
+
+The codegen template above satisfies 1–4 by default. Skips are still legal — `optional: true` steps render a Skip button that calls `next()` without running validation.
+
+### Verification (Phase 4 and 4b)
+
+- **Phase 4 pixel diff**: drive the stepper via Playwright with a single `page.goto("/onboarding")`, then `click('button:has-text("Next")')` between screenshots. Screenshot only the `[data-stepper-body]` region; mask the shared shell bbox in both the Figma export and the rendered screenshot (`mask_regions[]` in flow-graph). Compare each step's body to the corresponding `stepper_groups[0].steps[i]` Figma frame.
+- **Phase 4b smoke test**: replace the route loop with a stepper driver. Example:
+
+```ts
+test("onboarding stepper advances through all steps", async ({ page }) => {
+  await page.goto("/onboarding");
+  for (let i = 0; i < 3; i++) {
+    await expect(page.getByText(`Step ${i + 1} of 3`)).toBeVisible();
+    if (i < 2) await page.getByRole("button", { name: /next/i }).click();
+  }
+  // final step's Next navigates to the post-flow route (or reloads to step 0)
+});
+```
+
+For `mode: hybrid`, emit one stepper-style block per group and one route-style block per standalone page, joined in the same spec file.
+
+### Shared-shell interaction
+
+When `stepper_groups[i].shell_component_node_id` resolves to a design-system component present in `design-tokens.components[]`, reuse it via import. When not, generate a local `_components/OnboardingShell.tsx` from the shell's IR. Either way the shell receives `currentStep`, `totalSteps`, and `stepTitles` props so the progress indicator stays in sync with the provider.
+
+### Non-negotiables
+
+- The stepper page itself MUST NOT call `router.push` for internal step changes. Use the provider's `next()`/`back()` so state and history stay consistent.
+- Form data persists across step changes — never unmount the provider between steps; `_steps/Step*.tsx` components unmount/mount, but `page.tsx` stays mounted for the life of the flow.
+- `reset()` is called automatically after the final step if the last step's Next button has `link_target.edge_kind === "route"` (exit edge), so revisiting the stepper route starts fresh unless persistence is `local`.

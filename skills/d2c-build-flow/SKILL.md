@@ -33,6 +33,7 @@ These rules hold across every phase of this skill. No exceptions.
 8. **Flow IR freezes in Phase 2a; page IR freezes per page in Phase 2.** Neither may re-decide the other without user input. Phase 3 reads both IRs as frozen; if a fix would require changing the flow graph, STOP AND ASK.
 9. **Never auto-generate Next buttons that weren't drawn in Figma.** If no interactive component in a page carries a `link_target`, emit a TODO comment and flag the edge as `inferred: true` in the report. Do not invent chrome to make the pixel-diff or the nav test "pass."
 10. **The report must echo the parsed step list.** Users verify intent by diffing "what I wrote" against "what you understood."
+11. **One argument controls flow shape: `mode:`.** It has four values — `auto` (default), `routes`, `stepper`, `hybrid`. When the user omits `mode:`, Phase 2a auto-detects from Figma via `detect-mode.js` and logs the chosen mode + per-signal reasons. Explicit `mode:` always wins. Auto-detection confidence below 0.55 aborts Phase 2a with a structured error listing signal scores — never silently picks a wrong shape.
 
 ---
 
@@ -109,6 +110,43 @@ Exactly one `Step:` line (no number). The parser returns `auto_discovered: true`
 
 Mixing Form C with Form A/B (or listing multiple `Step:` lines) → **F-FLOW-PARSE-AMBIGUOUS**.
 
+**Mode directive (any form) — `mode: auto | routes | stepper | hybrid`**
+
+Declare the flow shape in the preamble (typically trailing the route line):
+```
+this is the route /onboarding, mode: stepper
+```
+Values:
+- `auto` (default when omitted) — Phase 2a runs `detect-mode.js` against the Figma frames to pick `routes` / `stepper` / `hybrid`.
+- `routes` — every step is its own URL (today's behaviour). Forbids `Stepper group` blocks.
+- `stepper` — all steps share one URL and swap in place. If no `Stepper group` blocks are present, Phase 2a wraps the entire `steps[]` into a single implicit group named after the flow.
+- `hybrid` — one or more explicit `Stepper group` blocks mixed with bare `Step:` lines. Requires at least one block.
+
+Unknown values → **F-FLOW-MODE-UNKNOWN** with the allowed set shown.
+
+**Stepper group blocks (mode: stepper or hybrid)**
+```
+Stepper group "intake" at /signup:
+  Step 1: <figma-frame-url>  title: "Name"
+  Step 2: <figma-frame-url>  title: "Email"  validate: form
+```
+- Header: `Stepper group "<name>" at <route>:` — quoted name (single or double), followed by the single route the group is mounted at.
+- Steps under the header are group-internal: their `step_number` must be 1-based contiguous within the group and their URLs are rendered as swappable bodies sharing the group's route.
+- Per-step directives legal in groups: `title:` (stepper label), `optional: true|false` (Skip button), `validate: none|form` (Next gate), `state:` (shared form fields).
+- Groups are closed when a line de-indents to ≤ header indent or a new group starts. Empty groups (<2 steps) → **F-FLOW-STEPPER-GROUP-EMPTY**.
+- Two groups with the same name → **F-FLOW-STEPPER-GROUP-DUP**.
+
+A full hybrid prompt:
+```
+/d2c-build-flow
+Build the signup, this is the route /signup, mode: hybrid
+Stepper group "intake" at /signup:
+  Step 1: <url>  title: "Name"
+  Step 2: <url>  title: "Email"
+Step 1: <url>  route: /signup/verify
+Step 2: <url>  route: /signup/welcome
+```
+
 ### Grammar rules (also documented in `references/failure-modes.md`)
 
 - **Preamble**: any free text before the first candidate step line. Capture `base_route` as the first match of `/\broute\s+(\/\S+)/i` in the preamble; strip trailing punctuation.
@@ -126,10 +164,22 @@ Mixing Form C with Form A/B (or listing multiple `Step:` lines) → **F-FLOW-PAR
 ### Output of Phase 1
 
 ```
-{ ok, failures[], base_route, flow_name, auto_discovered, steps: [{ step_number, figma_url, node_id, route, route_source }] }
+{
+  ok,
+  failures[],
+  base_route,
+  flow_name,
+  auto_discovered,
+  mode: "auto" | "routes" | "stepper" | "hybrid",
+  mode_source: "explicit" | "default",
+  steps: [{ step_number, figma_url, node_id, route, route_source }],
+  stepper_groups: [{ name, raw_name, route, header_line, validation_enabled, steps: [...] }]
+}
 ```
 
 `auto_discovered === true` signals Phase 2a to run Figma-prototype BFS instead of trusting the user's step list for page enumeration. In Form A/B the flag is `false` and the flow is exactly as the user listed.
+
+`mode` carries the user's declared flow shape; when `"auto"`, Phase 2a calls `detect-mode.js` to resolve it to one of the three terminal values before writing `flow-graph.json`. `stepper_groups[]` holds any explicit `Stepper group` blocks; additional groups may be synthesised in Phase 2a (either by wrapping all steps when `mode: stepper` is declared with no blocks, or by `detect-mode.js` partitioning in `mode: auto`).
 
 `node_id` is extracted from the URL's `node-id` query parameter and normalised to colon form (e.g. `1-2` → `1:2`) to match Figma's MCP node id format.
 
@@ -202,12 +252,28 @@ Create `.claude/d2c/runs/<YYYY-MM-DDTHHMMSS>/flow/` containing `flow-graph.json`
 3. **Shell detection.** Compare top-level children across every page's design context. Use the same component-match scoring pass that Phase 2 uses for candidate identification. A shared shell is identified when ≥ 75% of pages contain the same top-level component instance. Otherwise fire **F-FLOW-SHELL-DIVERGENT** (inform; fall back to no layouts).
    - When identified, add a single `layouts[]` entry with PascalCase `name` (derived from the shared component's Figma name, e.g. `OnboardingShell`), `figma_node_id` pointing at the shared component, and `applies_to` listing every page that contains it.
    - The detection itself is implemented by `skills/d2c-build-flow/scripts/detect-shared-shell.js` — call its exported `detectSharedShell({ pages, threshold })` after collecting `top_level_children` per page. `layouts: []` + `divergent: true` is the signal to fire `F-FLOW-SHELL-DIVERGENT`.
+   - **Stepper-indicator sub-detection.** `detectSharedShell` also scans each top-level child's `descendants[]` for a repeated component instance whose `variant` (or `properties.step`/`index`/`current`) differs per page in an ordered way. When found, the layout entry gets a `stepper_indicator` object capturing `component_id`, `node_ids_per_page`, `variants_per_page`, and `ordered`. This feeds mode detection and stepper codegen.
 
-4. **Edges.** Behaviour depends on `auto_discovered` and whether any step carries a branch suffix:
-   - **Linear declared steps (`auto_discovered === false`, no branches):** emit one linear edge per consecutive pair of pages:
+3a. **Mode resolution.** When Phase 1 returned `mode !== "auto"`, carry the declared value through to `flow-graph.mode` and set `mode_source = "explicit"`. When `mode === "auto"`, call `skills/d2c-build-flow/scripts/detect-mode.js` with:
+   - `pages[]` — each entry carries `node_id`, `figma_url`, `frame_size` from `get_design_context`, optional `differential_region` (derived by subtracting the shared-shell bbox from the frame bbox and reporting the leftover area ratio + bbox), and `prototype_edges[]` from the prototype metadata.
+   - `shell_result` — the `detectSharedShell` output with `threshold: 0.9` (stepper coverage bar is stricter than the default).
+   - `explicit_groups` — any `Stepper group` blocks already parsed.
+
+   The detector returns `detected_mode` (`routes` | `stepper` | `hybrid`), `mode_confidence` in `[0, 1]`, `mode_detection_reasons[]` (per-signal breakdown), a `partition` of pages into stepper/routes runs, and `aborted: true` when confidence is below 0.55. Handling per band:
+   - **`band: "silent"` (≥0.80):** write the result into the IR, log a single-line notice, proceed.
+   - **`band: "advisory"` (0.55–0.80):** write the result, print a prominent warning with the signal breakdown, proceed.
+   - **`band: "abort"` (<0.55):** fire **F-FLOW-MODE-UNDECIDABLE** and STOP AND ASK the user to pass `mode:` explicitly. Include the returned reasons verbatim.
+
+   When `mode` resolves to `stepper` with no explicit `Stepper group` blocks, synthesise a single implicit group named after the flow (PascalCase of `flow_name`) containing all top-level steps. When `mode` is `hybrid`, keep explicit groups as-is; when the detector returns additional stepper runs beyond what the user declared, merge them into `stepper_groups[]` with `detected_mode_run: true` for observability.
+
+   Finally, for every stepper group (explicit or detected), insert a single virtual `pages[]` entry with `page_type: "stepper_group"`, `node_id: "stepper:<hash>"`, `route` equal to the group's route, `stepper_group_ref` equal to the group's name, and drop the group-internal steps from `pages[]` — those steps live only in `stepper_groups[*].steps[]`.
+
+4. **Edges.** Behaviour depends on `auto_discovered`, branch suffixes, and stepper groups:
+   - **Linear declared steps (`auto_discovered === false`, no branches, no stepper groups):** emit one linear edge per consecutive pair of pages:
      - `from_node_id = pages[i].node_id`, `to_node_id = pages[i+1].node_id`.
      - `trigger = "onClick"`, `source_component_node_id = null`, `inferred = true`, `condition = null`.
      - v1 does not populate `source_component_node_id` in this mode — identifying the Next button is deferred to the per-page Phase 2 (where it lands on `component-match.link_target` instead).
+   - **Stepper-group internal edges (mode: stepper or hybrid):** do NOT add entries to `flow-graph.edges[]`. Inside a stepper group the "next step" action is represented at the page level via `stepper_groups[i].steps[]` order, and at the button level via `link_target.edge_kind = "step_delta"` written by `pick-link-target.js` during Phase 2b. The stepper-group virtual page may still have outgoing edges into the next top-level page (route-mode exit), and those ARE recorded in `edges[]` as normal.
    - **Branching declared steps (at least one `Step Na:` / `Step Nb:` in the prompt, B-FLOW-MULTI-BRANCH):** for each pair of consecutive unique step numbers, emit the edge(s) into the next group's pages:
      - A group of size 1 → one edge to the next group's only page (linear).
      - A group of size 2+ → N edges, one per sibling, all `from_node_id` sharing the previous page's `node_id`.
@@ -246,12 +312,20 @@ For each page in `flow-graph.pages[]` (in order):
 
 1. Set the run directory to `.claude/d2c/runs/<ts>/pages/<node_id>/`.
 2. Run the existing `/d2c-build` Phase 2 emit + validate process. Inputs: the page's `figma_url`, the project's design tokens, the framework reference file.
-3. **Link-target enrichment.** After `component-match.json` is emitted, run `skills/d2c-build-flow/scripts/pick-link-target.js` (or call the exported `pickLinkTarget({ componentMatch, toNodeId, layout })`) to identify the interactive component to wire. The script's heuristic: highest-ranked node whose `figma_name` matches `/next|continue|proceed|get started|sign up|submit|finish/i`, falling back to a primary-button node. Returns `null` when nothing is wireable.
-   - When a node is returned, populate `component-match.nodes[<id>].link_target`:
-     - `page_node_id = flow-graph.edges[i].to_node_id` (where `i` corresponds to the outgoing edge from this page)
-     - `trigger = "onClick"` (or `"onSubmit"` when the chosen node is inside a form region in `layout.json`)
-   - Update `flow-graph.edges[i].source_component_node_id` to this component's node id and set `inferred = false`.
-     *This is the one sanctioned mutation of `flow-graph.json` after Phase 2a — it only fills in previously-null fields and never changes page order, routes, or layouts. Validator allows the write; flow-rule #8 still forbids re-ordering or route changes.*
+3. **Link-target enrichment.** After `component-match.json` is emitted, run `skills/d2c-build-flow/scripts/pick-link-target.js` (or call the exported `pickLinkTarget(...)`). The script accepts two target shapes — pass exactly one:
+   - `toNodeId` — the next page's node id (route navigation).
+   - `stepDelta` — a signed integer, typically `+1` (Next) or `-1` (Back), for stepper-internal advancement. Back targeting uses a different text regex (`/back|previous|prev|return/i`) so a stepper with both buttons visible wires each correctly.
+
+   The heuristic otherwise matches today's: highest-ranked node whose `figma_name` matches the forward text set (or the back set for `-1`), with a primary-button fallback.
+
+   Populate `component-match.nodes[<id>].link_target` from the returned descriptor:
+   - Always: `page_node_id = <this page's node_id>`, `trigger` = `"onClick"` or `"onSubmit"` (form regions).
+   - `edge_kind: "route"` + `to_node_id` when the returned descriptor is a route edge.
+   - `edge_kind: "step_delta"` + `step_delta` (signed int) when the returned descriptor is a stepper-internal edge. No `to_node_id` is written for step-delta edges — Phase 3 reads the step order from `stepper_groups[*].steps[]`.
+
+   For stepper-group virtual pages, Phase 2b runs `pick-link-target` **per step frame** (each step's own `component-match.json`), once with `stepDelta: +1` and once with `stepDelta: -1`, so every step carries its own Next/Back wiring.
+
+   For route-edge enrichment, update `flow-graph.edges[i].source_component_node_id` to the chosen component's node id and set `inferred = false`. *This is the one sanctioned mutation of `flow-graph.json` after Phase 2a — it only fills in previously-null fields and never changes page order, routes, or layouts. Validator allows the write; flow-rule #8 still forbids re-ordering or route changes.*
 4. If no wireable component is identified, leave `component-match.link_target` absent on every node (the edge stays `inferred: true`).
 
 Skip page-level Phase 2 for any page whose `not_supported_detected[]` entry the user asked to `skip` during Phase 2a.
@@ -289,9 +363,10 @@ Skip page-level Phase 2 for any page whose `not_supported_detected[]` entry the 
 
 1. **Shared layout files** (when `layouts[]` non-empty) — see `references/framework-react-next.md` §"Shared layout".
 2. **Shared state provider** (when `shared_state[]` non-empty) — see §"Shared state provider". The provider template branches on `shared_state[i].persistence`: `"memory"` emits an in-memory React state module; `"session"` emits the sessionStorage-backed, SSR-safe variant; `"local"` emits the localStorage-backed variant with an opt-in TTL envelope read from `shared_state[i].ttl_seconds`.
-3. **Per-page files** — delegate to `/d2c-build` Phase 3 per page, with two flow-specific additions:
-   - If the page's `component-match.json` contains a node with `link_target`, wire the handler (see §"Page files").
+3. **Per-page files** — delegate to `/d2c-build` Phase 3 per page, with three flow-specific additions:
+   - If the page's `component-match.json` contains a node with `link_target`, wire the handler (see §"Page files"). For `link_target.edge_kind === "step_delta"`, wire to the stepper provider's `next()`/`back()` instead of `router.push` (see §"Stepper groups" in `framework-react-next.md`).
    - If the page is inside a layout, place it at `app/<route>/page.tsx` relative to the layout directory and do NOT re-emit the shell — Next's App Router composes automatically.
+   - If the page is `page_type: "stepper_group"`, do NOT delegate to `/d2c-build` per-page codegen. Instead emit the stepper per §"Stepper groups (single-route multi-step)" in `framework-react-next.md`: one `app/<group_route>/page.tsx`, per-step files under `_steps/`, and a provider under `_state/`. Each step's IR comes from its own `/d2c-build` Phase 2 run (keyed by the step's `node_id`), but the output shape is a step component, not a route page.
 
 ### Rules carried over from `/d2c-build`
 
@@ -418,6 +493,44 @@ Step 3: https://www.figma.com/design/xyz/Signup?node-id=10-3  route: /signup/com
 
 Expected: pages at `/signup`, `/signup/verify`, `/signup/complete`; no base route; `flow_name` prompts the user once (or is auto-derived from the longest common route prefix `/signup`).
 
+**Example 3 — onboarding stepper (mode: stepper)**
+
+```
+/d2c-build-flow
+Build the onboarding, this is the route /onboarding, mode: stepper
+Step 1: https://www.figma.com/design/abc/Onboarding?node-id=1-2  title: "Email"
+Step 2: https://www.figma.com/design/abc/Onboarding?node-id=3-4  title: "Verify"  validate: form
+Step 3: https://www.figma.com/design/abc/Onboarding?node-id=5-6  title: "Profile"
+```
+
+Expected: a single virtual page at `/onboarding`, a stepper group containing the three steps, one `OnboardingShell` layout if detected, `_steps/StepEmail.tsx` + `StepVerify.tsx` + `StepProfile.tsx`, `_state/OnboardingContext.tsx` with `currentStep`, URL never changes when clicking Next, browser-back undoes a step.
+
+**Example 4 — signup hybrid (stepper + standalone routes)**
+
+```
+/d2c-build-flow
+Build the signup, this is the route /signup, mode: hybrid
+Stepper group "intake" at /signup:
+  Step 1: https://www.figma.com/design/abc/Signup?node-id=10-1  title: "Name"
+  Step 2: https://www.figma.com/design/abc/Signup?node-id=10-2  title: "Email"
+Step 1: https://www.figma.com/design/abc/Signup?node-id=20-1  route: /signup/verify
+Step 2: https://www.figma.com/design/abc/Signup?node-id=30-1  route: /signup/welcome
+```
+
+Expected: stepper mounted at `/signup` (2 steps, swap in place), then standalone routes `/signup/verify` and `/signup/welcome`; the final step's Next navigates out of the stepper via a route edge; stepper context unmounts on exit.
+
+**Example 5 — auto-detected mode (no `mode:` directive)**
+
+```
+/d2c-build-flow
+Build the onboarding, this is the route /onboarding
+Step 1: https://www.figma.com/design/abc/Onboarding?node-id=1-2
+Step 2: https://www.figma.com/design/abc/Onboarding?node-id=3-4
+Step 3: https://www.figma.com/design/abc/Onboarding?node-id=5-6
+```
+
+Expected: Phase 1 sets `mode: "auto"`, `mode_source: "default"`. Phase 2a runs `detect-mode.js`; when the three frames share the same size, a ≥90% shell, and an ordered stepper indicator, it resolves to `mode: "stepper"` with `mode_confidence ≥ 0.80` (silent band). When the frames are mixed-size or share no shell, it resolves to `mode: "routes"`. Either way, the IR records `mode_source: "auto-detected"` and `mode_detection_reasons[]` so the Phase 6 report shows exactly why the shape was picked.
+
 ---
 
 ## Failure modes index
@@ -433,6 +546,10 @@ See `references/failure-modes.md` for the full list. Quick reference:
 | 1 | F-FLOW-ROUTE-ESCAPES-BASE | inform |
 | 1 | F-FLOW-TOO-FEW-STEPS | stop-and-ask |
 | 1 | F-FLOW-TOKENS-MISSING | fatal |
+| 1 | F-FLOW-MODE-UNKNOWN | stop-and-ask |
+| 1 | F-FLOW-STEPPER-GROUP-EMPTY | stop-and-ask |
+| 1 | F-FLOW-STEPPER-GROUP-DUP | stop-and-ask |
+| 2a | F-FLOW-MODE-UNDECIDABLE | stop-and-ask |
 | 2a | F-FLOW-OVERLAY-AS-PAGE | inform |
 | 2a | F-FLOW-CONDITIONAL | inform |
 | 2a | F-FLOW-MISSING-STATE | stop-and-ask |
