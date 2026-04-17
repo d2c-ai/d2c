@@ -55,6 +55,26 @@
         "chosen_reasoning": {
           "type": "string",
           "description": "Prose explaining why chosen was picked. Mandatory so the file is human-inspectable without Figma open."
+        },
+        "link_target": {
+          "$ref": "#/definitions/link_target",
+          "description": "Optional. Only populated by d2c-build-flow when this node is an interactive component (button, link) that navigates to another page in the flow. Phase 3 wires this into a router.push / NavLink call. Unused by /d2c-build."
+        }
+      },
+      "additionalProperties": false
+    },
+    "link_target": {
+      "type": "object",
+      "required": ["page_node_id", "trigger"],
+      "properties": {
+        "page_node_id": {
+          "type": "string",
+          "description": "The node_id of the destination page in flow-graph.json pages[]."
+        },
+        "trigger": {
+          "type": "string",
+          "enum": ["onClick", "onSubmit"],
+          "description": "The DOM event that fires navigation. v1 codegen emits onClick for buttons and onSubmit for form buttons."
         }
       },
       "additionalProperties": false

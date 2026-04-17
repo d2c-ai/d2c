@@ -17,6 +17,7 @@
  */
 
 const fs = require("fs");
+const path = require("path");
 const { execSync } = require("child_process");
 
 /**
@@ -38,20 +39,92 @@ function requireGlobal(name) {
 const { PNG } = requireGlobal("pngjs");
 const pixelmatch = requireGlobal("pixelmatch");
 
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
+
+// --mask <path> is optional and can appear anywhere. Strip it before
+// positional parsing so existing callers that pass 3-4 positionals still work.
+let maskPath = null;
+const args = [];
+for (let i = 0; i < rawArgs.length; i++) {
+  if (rawArgs[i] === "--mask") {
+    maskPath = rawArgs[++i];
+  } else {
+    args.push(rawArgs[i]);
+  }
+}
 
 if (args.length < 3) {
   console.error(
-    "Usage: node pixeldiff.js <image1.png> <image2.png> <diff.png> [threshold]"
+    "Usage: node pixeldiff.js <image1.png> <image2.png> <diff.png> [threshold] [--mask regions.json]"
   );
   console.error(
     "  threshold: 0-1, smaller = more sensitive (default: 0.1)"
+  );
+  console.error(
+    "  --mask regions.json: JSON array of { x, y, width, height } rectangles to zero before diffing"
   );
   process.exit(1);
 }
 
 const [img1Path, img2Path, diffPath, thresholdStr] = args;
 const threshold = parseFloat(thresholdStr || "0.1");
+
+function loadMaskRects(maskFilePath) {
+  if (!maskFilePath) return [];
+  const raw = fs.readFileSync(maskFilePath, "utf8");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`mask file is not valid JSON: ${e.message}`);
+  }
+  // Accept either a bare array of rects or an object with a `rects`/`regions` key.
+  let rects;
+  if (Array.isArray(parsed)) {
+    rects = parsed;
+  } else if (Array.isArray(parsed.rects)) {
+    rects = parsed.rects;
+  } else if (Array.isArray(parsed.regions)) {
+    rects = parsed.regions.map((r) => r.rect || r);
+  } else {
+    throw new Error(
+      "mask file must be a JSON array of rects, or an object with a `rects` or `regions` property"
+    );
+  }
+  for (const r of rects) {
+    if (
+      !Number.isInteger(r.x) ||
+      !Number.isInteger(r.y) ||
+      !Number.isInteger(r.width) ||
+      !Number.isInteger(r.height) ||
+      r.x < 0 ||
+      r.y < 0 ||
+      r.width < 1 ||
+      r.height < 1
+    ) {
+      throw new Error(
+        `invalid mask rect ${JSON.stringify(r)} — need integer x/y ≥ 0 and width/height ≥ 1`
+      );
+    }
+  }
+  return rects;
+}
+
+function zeroRectInPng(img, rect, w, h) {
+  const x0 = Math.max(0, rect.x);
+  const y0 = Math.max(0, rect.y);
+  const x1 = Math.min(w, rect.x + rect.width);
+  const y1 = Math.min(h, rect.y + rect.height);
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const idx = (w * y + x) << 2;
+      img.data[idx] = 0;
+      img.data[idx + 1] = 0;
+      img.data[idx + 2] = 0;
+      img.data[idx + 3] = 255;
+    }
+  }
+}
 
 // Validate inputs
 if (!fs.existsSync(img1Path)) {
@@ -104,6 +177,18 @@ function cropImage(img, w, h) {
 const cropped1 = cropImage(img1, width, height);
 const cropped2 = cropImage(img2, width, height);
 const diff = new PNG({ width, height });
+
+let maskRects = [];
+try {
+  maskRects = loadMaskRects(maskPath);
+} catch (e) {
+  console.error(`Error loading mask: ${e.message}`);
+  process.exit(1);
+}
+for (const r of maskRects) {
+  zeroRectInPng(cropped1, r, width, height);
+  zeroRectInPng(cropped2, r, width, height);
+}
 
 // Run pixelmatch
 const numDiffPixels = pixelmatch(

@@ -1,0 +1,382 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://d2c.dev/ir/flow-graph.schema.json",
+  "title": "d2c IR Flow Graph",
+  "description": "Flow-level IR emitted by d2c-build-flow Phase 2a before any per-page Phase 2 runs. Declares the ordered set of pages, linear edges between them, optional shared layouts, optional shared state, and not-supported detections (overlays, conditionals, loops). Authoritative source is the user's parsed prompt; Figma prototype metadata only feeds shell detection and contradiction warnings.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "flow_name",
+    "framework",
+    "entry_node_id",
+    "pages",
+    "edges",
+    "layouts",
+    "shared_state",
+    "not_supported_detected"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Flow IR artifact schema version. v1 only in MVP."
+    },
+    "flow_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Routing slug parent (e.g. 'onboarding'). Inferred from base_route basename; STOP-AND-ASK when absent."
+    },
+    "framework": {
+      "type": "string",
+      "enum": ["react", "vue", "svelte", "angular", "solid", "astro"],
+      "description": "Inherited from design-tokens.json. v1 codegen only supports react."
+    },
+    "meta_framework": {
+      "type": "string",
+      "enum": ["next", "nuxt", "sveltekit", "angular", "solidstart", "astro", "react", "vue", "svelte", "solid"],
+      "description": "Inherited from design-tokens.json. v1 codegen only supports next."
+    },
+    "base_route": {
+      "type": ["string", "null"],
+      "pattern": "^/[A-Za-z0-9_\\-/]*$",
+      "description": "Optional base route extracted from the prompt preamble (e.g. '/onboarding'). Null when the user provided explicit per-step routes and no preamble route."
+    },
+    "auto_discovered": {
+      "type": "boolean",
+      "default": false,
+      "description": "True when the flow was discovered from Figma prototype connections starting at entry_node_id rather than an explicit step list (Form C: `Step: <entry-url>`). When true, every edge MUST be inferred=false with a non-null source_component_node_id."
+    },
+    "cross_file": {
+      "type": "boolean",
+      "default": false,
+      "description": "True when pages[] spans more than one Figma file (B-FLOW-CROSS-FILE). Phase 2a must fetch metadata per unique file_key; the Phase 6 report surfaces the dependency list."
+    },
+    "file_keys": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Unique Figma file keys across pages[], in first-appearance order. Populated even for single-file flows (length 1)."
+    },
+    "entry_node_id": {
+      "type": "string",
+      "description": "node_id of the first page (step 1). Must appear in pages[]."
+    },
+    "pages": {
+      "type": "array",
+      "minItems": 2,
+      "description": "Ordered list of pages, one per parsed step. Order is authoritative; step_number is 1-based and contiguous.",
+      "items": {
+        "$ref": "#/definitions/page"
+      }
+    },
+    "edges": {
+      "type": "array",
+      "description": "Ordered list of navigation edges. For linear flows, one edge per consecutive page pair (length = pages.length - 1). For branching flows (B-FLOW-MULTI-BRANCH), a page may have out-degree > 1 — one outgoing edge per branch — and every outgoing branch MUST carry a non-null source_component_node_id (validator-enforced).",
+      "items": {
+        "$ref": "#/definitions/edge"
+      }
+    },
+    "layouts": {
+      "type": "array",
+      "description": "Zero or more shared layout shells detected across pages. Empty when shell detection finds no common subtree above threshold.",
+      "items": {
+        "$ref": "#/definitions/layout"
+      }
+    },
+    "shared_state": {
+      "type": "array",
+      "description": "Zero or more shared-state declarations spanning multiple pages. Empty when no form-like shared state is declared or detected.",
+      "items": {
+        "$ref": "#/definitions/shared_state"
+      }
+    },
+    "not_supported_detected": {
+      "type": "array",
+      "description": "Overlay/conditional/loop detections that the user was informed about. Each entry was surfaced to the user before codegen.",
+      "items": {
+        "$ref": "#/definitions/not_supported"
+      }
+    },
+    "mask_regions": {
+      "type": "array",
+      "description": "Optional per-page rectangles to zero out before pixel-diff comparison (B-FLOW-NAV-TEST-MASKING). Used to hide auto-generated chrome (steppers, progress bars) that would otherwise produce false negatives. Consumed by pixeldiff.js via `--mask <regions.json>`.",
+      "items": {
+        "$ref": "#/definitions/mask_region"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "page": {
+      "type": "object",
+      "required": ["step_number", "node_id", "figma_url", "title", "route", "order", "page_type"],
+      "properties": {
+        "step_number": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based step number from the user's prompt. Must equal order."
+        },
+        "node_id": {
+          "type": "string",
+          "description": "Figma node id extracted from the step URL (e.g. '1:234'). Unique across pages[]."
+        },
+        "figma_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "The exact URL the user supplied for this step."
+        },
+        "file_key": {
+          "type": ["string", "null"],
+          "description": "Figma file key (the path segment after `/design/` or `/file/`). Enables cross-file flows (B-FLOW-CROSS-FILE); null when the URL could not be parsed."
+        },
+        "title": {
+          "type": "string",
+          "description": "Figma frame name fetched via get_design_context. Human-readable anchor for the report."
+        },
+        "route": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9_\\-/]*$",
+          "description": "Resolved route: explicit per-step route wins, otherwise base_route + /step-<N>."
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based position in the flow. Equals step_number in v1."
+        },
+        "layout": {
+          "type": ["string", "null"],
+          "description": "Name of the layouts[] entry this page renders inside, or null if no shared shell applies."
+        },
+        "page_type": {
+          "type": "string",
+          "enum": ["page", "overlay"],
+          "description": "Discriminates full-page routes from overlay/modal children. 'page' renders at its own URL; 'overlay' mounts inside its parent page via an overlay portal and reflects its open/closed state through a `?overlay=<id>` query param (B-FLOW-OVERLAY-SUPPORT)."
+        },
+        "overlay_parent": {
+          "type": ["string", "null"],
+          "description": "When page_type='overlay', the node_id of the parent page that mounts this overlay. Must appear in pages[].node_id. Null for page_type='page'."
+        },
+        "overlay_query_param": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][A-Za-z0-9_-]*$",
+          "description": "Query-param key used to signal the overlay's open state in the URL (default 'overlay'). Null for page_type='page'. The overlay is open when `?<param>=<overlay-slug>` matches the overlay's route slug."
+        },
+        "branch": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z]$",
+          "description": "Optional branch letter for multi-branch flows (B-FLOW-MULTI-BRANCH). When set, this page is one of N siblings at the same step_number (e.g. 3a, 3b). Null for linear flows."
+        },
+        "mobile_variant": {
+          "type": ["object", "null"],
+          "description": "Mobile viewport pair for this page (B-FLOW-MOBILE-VARIANT). When set, Phase 4 verifies both viewports and codegen emits responsive CSS (tokens-aware) rather than two components. Null for desktop-only pages.",
+          "required": ["figma_url", "node_id"],
+          "properties": {
+            "figma_url": {
+              "type": "string",
+              "format": "uri",
+              "description": "Exact mobile Figma frame URL supplied via `mobile: <url>`."
+            },
+            "node_id": {
+              "type": "string",
+              "description": "Mobile frame's Figma node id (colon form)."
+            },
+            "file_key": {
+              "type": ["string", "null"],
+              "description": "Figma file key of the mobile frame; may differ from the desktop file (rarely useful, but allowed)."
+            }
+          },
+          "additionalProperties": false
+        },
+        "state_writes": {
+          "type": "array",
+          "description": "Fields this page writes into shared state, from the optional `state:` directive in Phase 1. Names feed the generated TypeScript interface; types restricted to primitives in v1.",
+          "items": {
+            "type": "object",
+            "required": ["name", "type"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][A-Za-z0-9]*$",
+                "description": "camelCase field identifier (matches the shared-state key)."
+              },
+              "type": {
+                "type": "string",
+                "enum": ["string", "number", "boolean"],
+                "description": "Primitive TypeScript type. Complex shapes are not supported in v1."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "edge": {
+      "type": "object",
+      "required": ["from_node_id", "to_node_id", "trigger", "source_component_node_id", "inferred", "condition"],
+      "properties": {
+        "from_node_id": {
+          "type": "string",
+          "description": "Source page node_id. Must appear in pages[].node_id. May repeat across edges[] entries when a page has multiple outgoing branches (B-FLOW-MULTI-BRANCH) or when a page opens multiple overlays (B-FLOW-OVERLAY-SUPPORT)."
+        },
+        "to_node_id": {
+          "type": "string",
+          "description": "Destination page node_id. Must appear in pages[].node_id."
+        },
+        "trigger": {
+          "type": "string",
+          "enum": ["onClick", "onSubmit", "onLoad"],
+          "description": "DOM-level trigger that fires navigation."
+        },
+        "source_component_node_id": {
+          "type": ["string", "null"],
+          "description": "Figma node id of the button/link that triggers the navigation when identifiable. Null when the edge is inferred from step order and no wireable component was found."
+        },
+        "inferred": {
+          "type": "boolean",
+          "description": "True when the edge was derived from step order rather than a wired Figma prototype link or an identifiable Next button."
+        },
+        "condition": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/definitions/condition" }
+          ],
+          "description": "Optional gating condition for the edge (B-FLOW-CONDITIONAL-NAV). Null means the edge always fires. When set, codegen wraps the navigation in a state-check — see the condition definition."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["navigate", "open-overlay", "close-overlay"],
+          "default": "navigate",
+          "description": "Edge action kind (B-FLOW-OVERLAY-SUPPORT). 'navigate' = router.push to the target page. 'open-overlay' = mount the target overlay inside its parent page and set ?overlay=<slug>. 'close-overlay' = clear the overlay query param. Defaults to 'navigate'."
+        },
+        "is_loop": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when this edge closes a cycle in the flow graph (B-FLOW-LOOP-SUPPORT). The validator treats loop edges specially: cycles are legal, but per-test visit caps apply in the generated nav smoke test."
+        }
+      },
+      "additionalProperties": false
+    },
+    "condition": {
+      "type": "object",
+      "required": ["kind", "field"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["state-equals", "state-truthy", "state-falsy"],
+          "description": "Condition shape. 'state-equals' requires a matching `value`; 'state-truthy'/'state-falsy' coerce the field to Boolean."
+        },
+        "field": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9]*$",
+          "description": "Shared-state key to read. MUST match a key that some page writes via `state:` — validator flags unknown fields as likely typos."
+        },
+        "value": {
+          "description": "Required when kind='state-equals'. Compared with strict equality against the shared-state value at nav time."
+        }
+      },
+      "additionalProperties": false
+    },
+    "layout": {
+      "type": "object",
+      "required": ["name", "figma_node_id", "applies_to"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*$",
+          "description": "PascalCase identifier used for the generated layout component (e.g. 'OnboardingShell')."
+        },
+        "figma_node_id": {
+          "type": ["string", "null"],
+          "description": "Figma node id of the shared component when detected; null when the shell was inferred from overlap across pages."
+        },
+        "applies_to": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "List of page node_ids that render inside this layout. Each must appear in pages[].node_id."
+        }
+      },
+      "additionalProperties": false
+    },
+    "shared_state": {
+      "type": "object",
+      "required": ["name", "shape", "pages", "persistence"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9]*$",
+          "description": "camelCase identifier for the shared state slice (e.g. 'onboardingData')."
+        },
+        "shape": {
+          "type": "string",
+          "enum": ["form", "object"],
+          "description": "Whether the state is a form (keyed field values) or an opaque object. v1 codegen treats both as a plain object with setters."
+        },
+        "pages": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string" },
+          "description": "Page node_ids that read or write this state. Each must appear in pages[].node_id."
+        },
+        "persistence": {
+          "type": "string",
+          "enum": ["memory", "session", "local"],
+          "description": "Where the shared state lives between page navigations. 'memory' = component state (lost on reload); 'session' = sessionStorage (survives navigations, cleared on tab close); 'local' = localStorage (survives across sessions, cleared only on explicit reset or TTL expiry). Pair 'local' with an optional `ttl_seconds` to invalidate stored data after a time window."
+        },
+        "ttl_seconds": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Optional time-to-live for 'local' persistence, in seconds. When set, the provider wraps each write with a timestamp and discards stale data on read. Null (or absent) means 'never expire until reset() is called'. Ignored when persistence is 'memory' or 'session'."
+        }
+      },
+      "additionalProperties": false
+    },
+    "not_supported": {
+      "type": "object",
+      "required": ["kind", "node_id", "reason"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["overlay", "conditional", "loop", "cross_file", "mobile_variant"],
+          "description": "Category of unsupported construct detected."
+        },
+        "node_id": {
+          "type": "string",
+          "description": "Figma node id where the construct was detected."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Human-readable explanation shown to the user before they confirmed to continue."
+        }
+      },
+      "additionalProperties": false
+    },
+    "mask_region": {
+      "type": "object",
+      "required": ["page_node_id", "rect"],
+      "properties": {
+        "page_node_id": {
+          "type": "string",
+          "description": "node_id of the page this mask applies to. Must appear in pages[].node_id."
+        },
+        "rect": {
+          "type": "object",
+          "required": ["x", "y", "width", "height"],
+          "properties": {
+            "x": { "type": "integer", "minimum": 0 },
+            "y": { "type": "integer", "minimum": 0 },
+            "width": { "type": "integer", "minimum": 1 },
+            "height": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false,
+          "description": "Axis-aligned rectangle, in pixel coordinates of the rendered screenshot. Both the Figma export and the generated screenshot must agree on the coordinate system — pixeldiff zeroes the rect on both sides before comparing."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Human-readable justification (e.g. 'progress bar auto-generated by the stepper component')."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

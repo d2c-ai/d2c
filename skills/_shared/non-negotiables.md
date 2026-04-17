@@ -5,6 +5,7 @@ This file is the canonical source for the `## Non-negotiables` preamble block th
 Skill files that embed this block:
 - `skills/d2c-init/SKILL.md`
 - `skills/d2c-build/SKILL.md`
+- `skills/d2c-build-flow/SKILL.md`
 - `skills/d2c-audit/SKILL.md`
 - `skills/d2c-guard/SKILL.md`
 

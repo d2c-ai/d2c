@@ -164,6 +164,23 @@ It then auto-suggests reusable components from the Figma analysis, generates cod
 
 Scans for design token drift: hardcoded colors, spacing values that should use tokens, unused tokens, components bypassing the design system, and API calls not following established patterns. Outputs a detailed report with an adherence score.
 
+### Step 2b (optional): Build a multi-page flow
+
+When the thing you're building spans 2+ screens the user moves through in order — onboarding, checkout, KYC, signup, a wizard — use `/d2c-build-flow` instead of running `/d2c-build` per page. It takes one prompt listing every step in order, detects a shared layout shell, wires navigation between pages, and emits a Playwright navigation smoke test.
+
+```
+/d2c-build-flow
+In these following pages we need to build the following flow, this is the route /onboarding
+These are the steps:
+Step 1: https://www.figma.com/design/abc/Onboarding?node-id=1-2
+Step 2: https://www.figma.com/design/abc/Onboarding?node-id=3-4
+Step 3: https://www.figma.com/design/abc/Onboarding?node-id=5-6
+```
+
+Per-page IR, codegen, pixel-diff, and audit reuse the `/d2c-build` machinery unchanged — the flow layer only adds the shared layout, routing, optional shared state, and the navigation test. v1 targets Next.js App Router only.
+
+See [docs/getting-started-flow.md](docs/getting-started-flow.md) for the full walkthrough, Form B (explicit per-step routes), the Phase 6 report, and common failure modes.
+
 ---
 
 ## Example Prompts

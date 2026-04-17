@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://d2c.dev/ir/flow-manifest.schema.json",
+  "title": "d2c Flow Manifest",
+  "description": "Mechanical bookkeeping file written by d2c-build-flow at the end of Phase 2a. Anchors a flow run to a specific prompt text and tokens-file version so that tokens changing between Phase 2a and Phase 3 becomes a detectable failure. Mirrors skills/d2c-build/schemas/run-manifest.schema.json for the flow layer.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "flow_prompt_hash",
+    "design_tokens_hash",
+    "started_at",
+    "framework",
+    "meta_framework"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Flow manifest schema version. v1 only in MVP."
+    },
+    "flow_prompt_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 hex digest of the raw flow prompt text at run start."
+    },
+    "design_tokens_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 hex digest of the tokens file(s) at run start. Same hashing rule as run-manifest.tokens_file_hash: hash of design-tokens.json when split_files=false; SHA-256 over the four split files (core|colors|components|conventions) concatenated in that fixed order when split_files=true."
+    },
+    "started_at": {
+      "type": "string",
+      "description": "ISO 8601 timestamp (with timezone) of when the flow run started."
+    },
+    "framework": {
+      "type": "string",
+      "enum": ["react", "vue", "svelte", "angular", "solid", "astro"],
+      "description": "Framework resolved from design-tokens.json at run start."
+    },
+    "meta_framework": {
+      "type": "string",
+      "enum": ["next", "nuxt", "sveltekit", "angular", "solidstart", "astro", "react", "vue", "svelte", "solid"],
+      "description": "Meta-framework resolved from design-tokens.json at run start."
+    }
+  },
+  "additionalProperties": false
+}
