@@ -148,6 +148,58 @@ These rules apply in addition to the non-negotiables above. They govern HOW code
 
 ## Phase 1: Gather Inputs
 
+### 1.0 — Structured input mode (skip 1.1–1.2b when present)
+
+`/d2c-build-flow` invokes `/d2c-build` once per declared state variant with a pre-answered JSON payload. When `$ARGUMENTS` (or the first fenced block in the user message) is a JSON object whose top-level keys include `figma_url` AND (`component_name` OR `output_path`), treat it as **structured input mode**. In that mode:
+
+1. Skip intake questions 1–6 (§1.2b) — every answer is already in the payload.
+2. Do not write to `.claude/d2c/intake-history.json` — structured dispatches are not user-driven and would pollute the history (the flow's Phase 2a audit already logs them).
+3. Use the payload values directly in the per-component run directory.
+
+Payload schema (validated by `skills/d2c-build/scripts/parse-structured-input.js`):
+
+```json
+{
+  "figma_url": "https://www.figma.com/design/<key>/<file>?node-id=<id>",
+  "component_name": "DashboardLoading",
+  "output_path": "app/dashboard/loading.tsx",
+  "what": "page" | "section" | "component",
+  "mode": "functional" | "visual-only",
+  "viewports": "desktop-only" | "multiple",
+  "components_to_reuse": "use what makes sense",
+  "has_api_calls": "yes" | "no",
+  "semantic_role": "loaded" | "loading" | "empty" | "error" | "initial",
+  "trigger": "while fetching dashboard data",
+  "project_conventions": {
+    "component_type": "server" | "client" | "mixed",
+    "error_boundary": { "kind": "...", "import_path": string | null },
+    "data_fetching":  { "kind": "...", "example_import": string | null }
+  },
+  "parent_flow_run": ".claude/d2c/runs/<ts>/flow/",
+  "audit_path": ".claude/d2c/runs/<ts>/flow/audit.json"
+}
+```
+
+Required: `figma_url`, `component_name`, `output_path`, `semantic_role`, `project_conventions`. Everything else is optional and carries sensible defaults (`what: "component"`, `mode: "functional"`, `viewports: "desktop-only"`, `components_to_reuse: "use what makes sense"`, `has_api_calls: "no"`, `trigger: null`, `audit_path: null`). `audit_path`, when provided, must end in `audit.json` — Phase 6 appends the variant's pixel-diff result entry to that file (flow-level audit aggregation; see §Phase 6).
+
+Invocation helper:
+```bash
+node skills/d2c-build/scripts/parse-structured-input.js <payload-file>
+```
+The script exits 0 with the normalised JSON on stdout when the payload is valid, 1 with error lines on validation failure, and 2 on CLI misuse.
+
+**Semantic role hooks into Phase 3 codegen:**
+- `loaded` — render as today. `empty` and `initial` branches are emitted inside this component when the page also declares those variants.
+- `loading` — emit as a skeleton-style component. Phase 3 adds `aria-busy="true"` to the root (P2.1 hardens this). Location chosen by `project_conventions.error_boundary.kind`: Next file convention → `app/<route>/loading.tsx`; else → a sibling file composed inside `<Suspense>` (the flow's Phase 3 wires the composition).
+- `empty` — emit a pure presentational component with a semantic heading. Composed as a data-driven branch inside the `loaded` render, not a boundary.
+- `initial` — emit a pure presentational component for the pre-fetch / pre-action render (e.g. a search page before the query is typed, a checkout step before Pay is clicked). Composed as a data-driven branch inside the `loaded` render — never a Suspense or error boundary. The idle condition is sourced from `project_conventions.data_fetching.kind`: `react-query` → `status === 'idle'`; `swr` → `!data && !error && !isValidating`; `server-component-fetch` / `custom-hook` / `none` → an internal `hasRequested` flag that defaults to `false`. MUST NOT emit `aria-busy` (that belongs to `loading`). Trigger is not required and must be absent from the payload.
+- `error` — emit with `role="alert"`. When `project_conventions.error_boundary.kind === "next-file-convention"`, the flow places the file at `app/<route>/error.tsx` and prepends `'use client'` (Next.js requires it for error boundaries). When `react-error-boundary`, emit as a fallback component; when `custom-class`, emit as a fallback compatible with the detected class API. When `"none"`, emit the component but skip boundary wiring.
+- **Stubs** — an error-variant stub (`stub: true` in the flow IR) does NOT dispatch here. The flow's Phase 3 emits the placeholder directly (see `framework-react-next.md` §"State variants"). `/d2c-build` is never invoked for a stub. `initial` cannot be a stub — the flow rejects `initial` declarations without a URL at Phase 1b with `F-FLOW-VARIANTS-STUB-NON-ERROR`.
+
+**Trigger usage:** when `trigger` is non-null, Phase 1.4 prepends it to the Figma design context payload as a note: *"This variant fires when: <trigger>."* It feeds prompt context for Phase 3 so naming, aria labels, and copy match the scenario (e.g. "fetching dashboard" loading copy vs "submitting form" loading copy). It does NOT change the emitted component's API — the trigger lives in the skill prompt, not the component.
+
+After parsing, jump straight to §1.4 (Load Design Context) with the payload's `figma_url` already set.
+
 ### 1.1 — Get the Figma URL
 Ask the user for the Figma Dev Mode URL for the design. This is required.
 
@@ -1387,6 +1439,23 @@ After the audit:
    5. Do NOT report the metrics to the user unless they ask. This is silent bookkeeping.
 
    > **Note:** Build metrics are stored locally and never transmitted. They help you track iteration patterns and identify which component types need more rounds.
+
+5. **Flow-level audit append (structured input mode only).** When the Phase 1.0 payload carried a non-null `audit_path` (e.g. `.claude/d2c/runs/<ts>/flow/audit.json`), append this variant's result entry so the parent flow can aggregate per-variant pixel-diff outcomes without re-scanning per-page directories.
+
+   **Steps:**
+   1. Resolve `audit_path` relative to the project root. If it does not yet exist, create it with `{"pages": []}`.
+   2. Read and parse it.
+   3. Locate the page entry matching this build's `<node_id>` (the variant's host page). The flow skill populates `node_id` + `route` on first write — if the entry does not exist yet, create it with `{"node_id": "<node_id>", "route": "<route>", "variants": []}`. The flow skill seeds both fields at the start of Phase 4; `/d2c-build` only appends to `variants[]`.
+   4. Append one entry to `variants[]` keyed by `semantic_role`:
+      ```json
+      { "slot": "<semantic_role>", "final_score": <final pixel-diff match %>,
+        "rounds": <rounds_completed>, "status": "<pass | fail>" }
+      ```
+      For a `loaded` variant the slot is `"loaded"` — it is still appended, so the flow's Phase 6 sees every variant uniformly.
+   5. Write the file back with `JSON.stringify(..., null, 2)` — human-diffable, deterministic key order inside each entry (`slot`, `final_score`, `rounds`, `status`).
+   6. Do NOT emit a separate user-facing report line for this step — the flow's Phase 6 reads `audit.json` and renders the aggregated table.
+
+   If `audit_path` is null / absent (normal non-flow `/d2c-build` invocations), skip this step entirely. Loaded-only flows never set `audit_path` per variant — the flow skill still writes an `audit.json` at its own Phase 6 for identity-gate compatibility, but `/d2c-build` is not involved in that case.
 
 ---
 

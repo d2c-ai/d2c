@@ -217,6 +217,182 @@ Rules:
 
 ---
 
+## Phase 1b — State variant extraction
+
+Goal: from the raw prompt text, recognise `(figma_url, state_keyword, trigger, step_ref)` quadruples so Phase 2a can attach `state_variants` blocks to the correct pages / stepper steps. This phase is **prose-based, not grammar-based** — the skill does not extend the Phase 1 parser. Instead it instructs the executing model to read the prompt and produce a deterministic extraction table.
+
+When the user's prompt mentions only primary frames (no loading/empty/error language), this phase emits an empty extraction and every page keeps its pre-state-variants shape. **Identity guarantee:** a loaded-only prompt produces a loaded-only IR, byte-identical to the pre-state-variants pipeline.
+
+### Canonical state-keyword vocabulary
+
+Map the user's phrasing to one of five canonical keywords. Matching is case-insensitive, whole-phrase-preferred; fall back to the longest matching substring.
+
+| Canonical | Recognised phrasings |
+|---|---|
+| `loaded`  | `loaded`, `normal`, `default`, `populated`, `happy path`, `data view`, `primary`, `main` |
+| `loading` | `loading`, `skeleton`, `fetching`, `pending`, `placeholder`, `shimmer`, `spinner view` |
+| `empty`   | `empty`, `no data`, `zero state`, `null state`, `blank state`, `nothing to show` |
+| `error`   | `error`, `failed`, `failure`, `broken`, `crashed`, `fallback`, `something went wrong` |
+| `initial` | `initial`, `idle`, `pre-fetch`, `pristine`, `untouched`, `not started`, `before action`, `before search`, `waiting for input` |
+
+A frame mentioned without any state keyword is treated as `loaded` by default — this is the identity case. `loaded` is always inferred when absent, so the user never has to spell it out.
+
+The `initial` slot captures the **pre-fetch / pre-action** render — the moment a user lands on the page before any data request has been initiated or any user input has been given (e.g. a search page before the query is typed, a checkout step before Pay is clicked). It is distinct from `loading` (fetch in flight) and from `empty` (fetch completed, zero results). It is NOT a trigger-carrying state — the "when" is structural, not contextual.
+
+### Extraction algorithm
+
+Apply these rules in order:
+
+1. **Segment the prompt by host.** A "host" is either a route (e.g. `/dashboard`) or a step reference (e.g. `step 2` inside a stepper group). Walk the prompt top-to-bottom; every sentence or list item belongs to the host most recently introduced. The identifying phrase for a host may be `/route`, `"<route>"`, or `step N`.
+
+2. **Within each host segment, collect (state_keyword, figma_url) pairs by proximity.** For each Figma URL in the segment, scan backwards within the same clause for a state keyword. Stop at sentence boundaries. If no keyword is found in the clause, the URL maps to `loaded` by default.
+
+3. **Trigger capture.** For every `loading` and `error` pair, scan the same clause (and the following sentence if needed) for trigger phrasing — "while <doing X>", "on <Y>", "when <Z>", "during <W>", "if <V>". Store the trigger verbatim. If no trigger is found in the local context, mark the trigger as `MISSING` and defer to the clarification phase. The `loaded`, `empty`, and `initial` slots skip trigger capture — their "when" is structural (identity / zero-length data / pre-fetch).
+
+4. **Error stub detection.** An error mention with no Figma URL emits a stub entry: `{ stub: true, trigger: <captured or MISSING> }`. Only the `error` slot may be a stub — `loaded`/`loading`/`empty`/`initial` without a URL are parse failures.
+
+   Recognised phrasings (non-exhaustive; match case-insensitively, treat `—`/`-`/`:` as separators):
+   - "error state but no design yet" / "no design for error yet" / "error design TBD"
+   - "error: TBD" / "error: placeholder" / "error: WIP"
+   - "error state exists (placeholder for now)" / "error state exists — placeholder"
+   - "has an error state" / "we also need an error state" — when no URL appears within the same sentence or the immediately following one
+   - "error handled separately" / "error lives elsewhere" — when no URL is attached
+
+   Trigger capture still applies to stub entries. The stub MUST carry a trigger describing when the error fires; if no trigger phrasing is in the local context, mark the trigger `MISSING` and ask in the clarification phase (the phrasing "no design yet" does not itself count as a trigger).
+
+   When a stub is emitted, note it in the confirmation table with `stub: true` in the row so the user sees the contract explicitly before Phase 3 emits the dashed placeholder.
+
+5. **Collision rules.** If the same host ends up with two URLs claiming the same state (e.g. two different `loading` URLs for `/dashboard`), abort with a clear message listing both URLs and the host. The extractor MUST NOT silently pick one. If two different hosts share the same URL for the same state, allow it — frames legitimately get reused.
+
+6. **Mode inference.** After all hosts are extracted, infer the flow mode from the extraction shape:
+   - Only bare route hosts → `routes`.
+   - `step N` references inside a declared stepper group → `stepper`.
+   - Both → `hybrid`.
+   - A user-declared `mode:` directive from Phase 1 always wins — the inferred mode is only used when the parser left it as `auto`.
+
+7. **Form C rejection.** If Phase 1 returned `auto_discovered === true` and the extraction produced any state_variants, abort with **F-FLOW-VARIANTS-FORMC-UNSUPPORTED** (deferred to P3.1). Do not continue.
+
+### Extraction output
+
+Emit a normalised table the user sees in the confirmation gate (Phase 2a step 2d) and that Phase 2a step 2 uses to populate `state_variants[]`:
+
+```
+{host, step_ref?, state, figma_url?, trigger, stub?}
+```
+
+- `host` — route string (e.g. `/dashboard`) or `<group-name> step N`.
+- `step_ref` — 1-based step index inside the stepper group; null for bare routes.
+- `state` — one of `empty | error | initial | loaded | loading`.
+- `figma_url` — the supplied URL; absent for error stubs.
+- `trigger` — captured trigger text, or the literal string `MISSING` (clarified later). Required for `loading` and `error`; ignored for `loaded`, `empty`, and `initial`.
+- `stub` — `true` only on error entries with no URL.
+
+Rows are serialised alphabetically by `state` within each host, for diff stability (`empty`, `error`, `initial`, `loaded`, `loading`).
+
+### Examples the skill must handle
+
+**Mixed routes-mode prompt (all triggers inline):**
+```
+Build /dashboard — the normal view is https://figma.com/.../a,
+loading skeleton is https://figma.com/.../b while fetching the user's data,
+error view is https://figma.com/.../c if the fetch returns 5xx.
+Also /settings from https://figma.com/.../d.
+```
+Yields rows for `/dashboard` (`loaded`, `loading`, `error` — all with triggers) and `/settings` (`loaded` only).
+
+**Stepper-mode prompt:**
+```
+Three-step onboarding at /onboarding.
+Step 1: loaded .../a, loading .../b while validating email.
+Step 2: loaded .../c, loading .../d on password submit, error .../e on password mismatch.
+Step 3: loaded .../f.
+```
+Yields `step 1` (loaded + loading), `step 2` (loaded + loading + error), `step 3` (loaded only).
+
+**Trigger missing → deferred to clarification:**
+```
+Loading state for /dashboard is https://figma.com/.../b
+```
+Yields one row `{host: "/dashboard", state: "loading", figma_url: ".../b", trigger: "MISSING"}`. The clarification phase will ask "When does the loading state show for /dashboard?".
+
+**Error stub declaration:**
+```
+/dashboard: loaded is https://figma.com/.../a, plus an error state
+(no design yet) for when the fetch fails.
+```
+Yields `/dashboard` `loaded` (with URL) plus `error` as `{stub: true, trigger: "when the fetch fails"}`.
+
+**Initial-state declaration (pre-fetch render):**
+```
+/search — initial view is https://figma.com/.../a (before the user types),
+loaded is https://figma.com/.../b, loading .../c while querying Algolia,
+empty .../d when no results.
+```
+Yields `/search` with four rows in alphabetical order: `empty` (with URL, no trigger), `initial` (with URL, no trigger), `loaded` (with URL, no trigger), `loading` (with URL, trigger `"while querying Algolia"`). The `initial` row never enters trigger clarification.
+
+**Hybrid-mode prompt (standalone route + stepper group, both with full variant coverage):**
+```
+/dashboard with loaded https://figma.com/.../a,
+loading https://figma.com/.../b while fetching dashboard data,
+empty https://figma.com/.../c when the user has zero items,
+and error https://figma.com/.../d if the fetch returns 5xx.
+
+Plus a multi-step /checkout.
+Step 1: loaded https://figma.com/.../e,
+loading https://figma.com/.../f while confirming cart totals,
+empty https://figma.com/.../g when the cart is empty,
+error https://figma.com/.../h on payment provider failure.
+Step 2: loaded https://figma.com/.../i.
+```
+Yields two hosts: `/dashboard` (route, 4 rows — `empty`, `error`, `loaded`, `loading` with triggers where required) and `/checkout` (stepper group, step 1 with 4 rows + step 2 with loaded only). Mode inference reads `step N` + bare route → `hybrid`. Phase 2a step 6a attaches the `/dashboard` block to `pages[dashboard].state_variants` and the `/checkout step 1` block to `stepper_groups[checkout].steps[0].state_variants` — the two hosts never share slots and never cross-contaminate.
+
+### Failure modes
+
+- **F-FLOW-VARIANTS-FORMC-UNSUPPORTED** — state variants declared alongside `Step: <entry-url>` (Form C). MVP scope; deferred to P3.1. STOP AND ASK the user to either (a) drop the state variant language and let the flow ship as loaded-only, or (b) switch to explicit `Step N:` form.
+- **F-FLOW-VARIANTS-COLLISION** — two URLs for the same `(host, state)` pair. STOP AND ASK, showing both URLs.
+- **F-FLOW-VARIANTS-ORPHAN-URL** — a URL was mentioned with a state keyword but no recognisable host. Likely the prompt lacks a route / step anchor. STOP AND ASK with the failing sentence quoted.
+- **F-FLOW-VARIANTS-STUB-NON-ERROR** — the user declared a state without a URL for `loaded`, `loading`, `empty`, or `initial` (only `error` may be a stub). STOP AND ASK.
+
+### Fallback: sibling-name detection
+
+When prompt extraction finds a `loaded` URL for a host but no URL for one or more of `loading` / `empty` / `error` / `initial`, opportunistically scan the primary frame's Figma parent for siblings whose names match the canonical vocabulary (`Dashboard — Loaded` / `Dashboard — Skeleton` / `Dashboard — Empty State` / `Dashboard — Error` / `Dashboard — Idle`). This is a secondary path — it never overrides an explicit URL from the prompt.
+
+**When to fire:**
+- Phase 1b extraction produced a `loaded` entry for the host, AND
+- One or more of `loading` / `empty` / `error` / `initial` is absent from the host's extracted rows, AND
+- The user did NOT pass `mode: no-fallback` (a per-flow opt-out directive).
+
+**How to fire:**
+1. Identify the primary frame's `parent_node_id`. This is NOT in the Phase 2a fixture (which carries only `top_level_children`), so a live Figma call is required: `mcp__Figma__get_design_context(parent_node_id)`. The response must carry a `children[]` array where each entry has at minimum `{node_id, name}`.
+2. Call the detector with the raw response:
+   ```bash
+   echo '{"primary_node_id": "...", "primary_figma_url": "...", "parent_context": <get_design_context response>}' \
+     | node skills/d2c-build-flow/scripts/detect-state-variants.js /dev/stdin
+   ```
+   Or import `detectStateVariants({primary_node_id, primary_figma_url, parent_context})` directly in Phase 2a JavaScript.
+3. Merge `result.found[slot]` into the host's IR `state_variants[slot]` ONLY for slots that were absent from prompt extraction. Prompt-derived entries always win.
+4. Surface `result.unmatched_siblings[]` in the §"Clarification phase" (Phase 2a step 2d): "I also saw these sibling frames but couldn't classify them — tell me which, if any, belong to a state variant: <list>". Collision entries (two siblings matching the same slot) are shown with both URLs so the user picks one.
+5. **Stage audit warnings (P2.4).** After the clarification phase resolves, record the leftover ambiguities on `flow_graph._pending_audit_warnings[]` so Phase 4 can persist them into `audit.json.warnings[]` (see §"Warnings surface (P2.4)"):
+   - For every entry in `result.unmatched_siblings[]` the user did NOT attach to a slot, push `{ kind: "fallback_unmatched_sibling", route: "<host route>", node_id: "<sibling node_id>", recommendation: "Rename the Figma frame to match a state keyword (e.g. 'Skeleton', 'Empty State', 'Error') or attach it explicitly in the prompt, then re-run /d2c-build-flow.", details: { name: "<sibling name>", candidate_slot: "<detector's best-guess slot, if any>" } }`. Omit `slot` because the siblings were NOT assigned.
+   - For every collision entry (a sibling whose detected slot was already filled by another sibling or by prompt extraction), push `{ kind: "fallback_collision", route: "<host route>", slot: "<colliding slot>", node_id: "<losing sibling node_id>", recommendation: "Two frames match the <slot> slot for <route> — disambiguate by renaming one (or removing it from the parent section) before the next run.", details: { name: "<losing sibling name>", other_node_id: "<winning node_id>" } }`.
+   These entries drain into `audit.json.warnings[]` during Phase 4's audit-seeding pass (see §"Warnings surface" rule 2). `_pending_audit_warnings` is in-memory only and never serialised into `flow-graph.json`; when Phase 4 is skipped (rare — e.g. `--plan-only`), Phase 4 itself stages the list to the sidecar `<run-dir>/flow/pending-audit-warnings.json` so the next Phase 4 run can drain it.
+
+**What the detector matches** (mirrors Phase 1b vocabulary — `loaded` keywords are NOT matched because the primary is always the loaded frame):
+- `loading`: loading, skeleton, fetching, pending, placeholder, shimmer, spinner
+- `empty`: empty, no data, zero state, null state, blank state, nothing to show
+- `error`: error, failed, failure, broken, crashed, fallback, something went wrong
+- `initial`: initial, idle, pre-fetch, pristine, untouched, not started
+
+Whole-word matches outrank substring matches; longest phrase wins when multiple fire. Case-insensitive, whitespace- and punctuation-tolerant (so `Home — Empty State` and `home_empty_state` both classify the same way).
+
+**Cross-file rejection:** siblings whose `file_key` differs from the primary's are dropped silently — BFS-over-one-parent always shares the primary's file key, so a mismatch is a structural error rather than a naming ambiguity.
+
+**Limitations:**
+- The detector does NOT guess triggers — every slot it populates still needs a trigger when required (only `loading` and `error`), so §"Clarification phase" still asks "When does `<state>` show for `<host>`?" for every newly-populated `loading` / `error` row. `empty` and `initial` rows are trigger-free and never enter clarification.
+- False positives are possible — "PendingTasksCard" would substring-match the `loading` → `pending` keyword, and "InitialPageTitle" could substring-match the `initial` slot. The confirmation gate (Phase 2a step 2d) surfaces every detected entry for explicit approval before dispatch, so false positives are user-visible and correctable, not silent.
+
+---
+
 ## Phase 2a — Flow Planning
 
 Goal: produce a validated, frozen `flow-graph.json` from the parsed step list plus Figma metadata.
@@ -289,6 +465,58 @@ Create `.claude/d2c/runs/<YYYY-MM-DDTHHMMSS>/flow/` containing `flow-graph.json`
 
 6. **Prototype vs declared order.** If prototype metadata exists and implies an order that differs from the declared steps, fire **F-FLOW-PROTOTYPE-CONTRADICTS-ORDER** (inform only; user's list wins).
 
+6a. **Attach state variants.** Consume the extraction table from Phase 1b and populate `state_variants` on the corresponding pages / stepper steps. Rules:
+   - Pair every extraction row to its host by (route) for routes-mode rows, or by (stepper_groups[].name, step_ref) for stepper/hybrid rows. An unmatched row → fire **F-FLOW-VARIANTS-UNMATCHED-HOST** and STOP AND ASK with the row quoted.
+   - For the `loaded` slot: reuse the host's own `node_id` + `figma_url` (do not re-parse — identity with the host is enforced by the validator).
+   - For `loading`, `empty`, `error`: parse `file_key`, `node_id` from the supplied URL (same extraction as step 2's URL parsing). Carry `trigger` verbatim.
+   - For error stubs: emit `{ stub: true, trigger }` and leave `node_id`/`figma_url` unset (validator enforces the mutex).
+   - If a host ends up with only a `loaded` row, **omit the `state_variants` key entirely** from that page/step. This keeps loaded-only flows byte-identical with the pre-state-variants IR (identity gate, P0.8).
+   - Serialize each `state_variants` object with keys in alphabetical order (`empty`, `error`, `loaded`, `loading`) — P2.3 hardens this via the validator's normaliser; step 6a relies on the producer emitting them in order in MVP.
+
+6b. **Project convention detection.** When at least one page/step carries a `state_variants` block, run the convention detector to populate `flow_graph.project_conventions`:
+   ```bash
+   node skills/d2c-build-flow/scripts/detect-project-conventions.js <project-root>
+   ```
+   The script walks the project root (`app/**`, `src/app/**`, source files, `package.json`) and emits:
+   ```json
+   {
+     "component_type": "server" | "client" | "mixed",
+     "error_boundary": { "kind": "next-file-convention" | "react-error-boundary" | "custom-class" | "none", "import_path": string | null },
+     "data_fetching":  { "kind": "server-component-fetch" | "react-query" | "swr" | "custom-hook" | "none", "example_import": string | null }
+   }
+   ```
+   Write the block verbatim into `flow_graph.project_conventions`. Skip entirely when no host declared `state_variants` — loaded-only flows do not need convention data and the validator forbids the block in that case.
+
+6c. **Clarification phase.** After extraction + convention detection, resolve the unknowns:
+   1. For every extraction row with `trigger === "MISSING"`, ask: *"When does the `<state>` state show for `<host>`? (e.g. during initial data fetch, during form submission, on a specific action, other.)"* — one question per missing trigger, serialised top-to-bottom. Write the user's answer back into the row's `trigger` field.
+   2. When `project_conventions.component_type === "mixed"` AND the user prompt did not specify `'use client'` preference, ask: *"The project mixes Server and Client Components. Which should the generated pages be? (a) Server Components (async, data fetched on the server), (b) Client Components ('use client', data fetched in hooks)."* — normalise the answer to `server` or `client` and overwrite `component_type`.
+   3. When `project_conventions.error_boundary.kind === "none"` AND at least one page declares a non-stub `error` variant, ask: *"No error boundary was detected in the project. Options: (a) add `react-error-boundary` as a dependency and wire it in, (b) use the Next.js `error.tsx` file convention, (c) skip error-boundary wiring and render the error variant unconditionally at the data branch."* — overwrite `error_boundary` with the user's choice (`react-error-boundary` → install on first generation; `next-file-convention` → rely on file system; `none` → keep but record the user opted out so Phase 3 doesn't add imports).
+   4. When `project_conventions.data_fetching.kind === "none"` AND at least one page declares `loading` or `error`, ask: *"No data-fetching library was detected. Options: (a) plain `fetch` inside async Server Components (default for Next.js), (b) `@tanstack/react-query`, (c) `swr`, (d) use a project-specific hook (paste the import)."* — overwrite `data_fetching` with the chosen kind + example_import.
+   5. **Confirmation table.** Print the final resolved plan and STOP AND ASK `y = proceed / e = edit prompt / n = abort`. Skip when `--yes` is in `$ARGUMENTS`.
+
+   Format:
+
+   ```
+   State variants:
+     /dashboard      loaded   https://figma.com/.../a   —
+     /dashboard      loading  https://figma.com/.../b   while fetching user dashboard data
+     /dashboard      error    https://figma.com/.../c   when the fetch returns 5xx
+     /settings       loaded   https://figma.com/.../d   —
+
+   Project conventions (detected):
+     component_type: server
+     error_boundary: next-file-convention
+     data_fetching:  server-component-fetch
+
+   Proceed? [y / e / n]
+   ```
+
+   Rules:
+   - `y` → continue to step 7.
+   - `e` → return control to the user for prompt edits; on resume, re-run Phase 1 + 1b + 2a from the top.
+   - `n` → stop cleanly with "aborted at variant-confirm gate".
+   - `--yes` short-circuits to `y` but still prints the table for audit.
+
 7. **Emit + validate.** Write `flow-graph.json` and run:
    ```bash
    node skills/d2c-build-flow/scripts/validate-flow-graph.js <run-dir>/flow/flow-graph.json
@@ -311,7 +539,32 @@ Create `.claude/d2c/runs/<YYYY-MM-DDTHHMMSS>/flow/` containing `flow-graph.json`
 For each page in `flow-graph.pages[]` (in order):
 
 1. Set the run directory to `.claude/d2c/runs/<ts>/pages/<node_id>/`.
-2. Run the existing `/d2c-build` Phase 2 emit + validate process. Inputs: the page's `figma_url`, the project's design tokens, the framework reference file.
+2. Run the existing `/d2c-build` Phase 2 emit + validate process for the **loaded** frame. Inputs: the page's `figma_url`, the project's design tokens, the framework reference file.
+
+2a. **Per-variant dispatch.** If the page carries a `state_variants` block, iterate the non-`loaded`, non-stub slots in alphabetical order (`empty`, then `error`, then `loading`) and dispatch `/d2c-build` in structured-input mode for each. Stub error entries are handled by Phase 3 codegen directly — do not dispatch for them.
+
+   For each slot:
+   - Set the per-variant run directory to `.claude/d2c/runs/<ts>/pages/<node_id>/variants/<slot>/`.
+   - Derive the `component_name` as `<PageName><SlotPascal>` (e.g. `DashboardLoading`, `DashboardEmpty`, `DashboardError`).
+   - Derive the `output_path` from `project_conventions` (see §Phase 3 §"State variants" in the framework reference — `next-file-convention` Server projects land `loading.tsx` / `error.tsx` at the route segment; Client projects land `_loading.tsx` / `_error.tsx` siblings; empty always lives inline inside the loaded component).
+   - Build the structured payload:
+     ```json
+     {
+       "figma_url": "<slot.figma_url>",
+       "component_name": "<derived>",
+       "output_path": "<derived>",
+       "semantic_role": "<slot>",
+       "trigger": "<slot.trigger or null for empty>",
+       "project_conventions": <flow_graph.project_conventions>,
+       "parent_flow_run": "<.claude/d2c/runs/<ts>/flow/>"
+     }
+     ```
+   - Validate it: `node skills/d2c-build/scripts/parse-structured-input.js <payload-file>`. Non-zero exit → regenerate from extraction data, retry up to 2 times, then fire **FX-UNKNOWN-FAILURE**.
+   - Invoke `/d2c-build` with the validated payload (Phase 1.0 detects the structured input and skips the Q&A gates). The per-variant `component-match.json` lands in the variant's run directory alongside the loaded page's.
+   - The loaded variant's `component-match.json` continues to live at `.claude/d2c/runs/<ts>/pages/<node_id>/` — not under `variants/loaded/`. This keeps loaded-only pages' layout unchanged (identity gate, P0.8).
+
+   For stepper groups with per-step `state_variants`, apply the same loop inside each step's Phase 2b pass. The per-step run directory becomes `.claude/d2c/runs/<ts>/pages/<group_node_id>/steps/<step_node_id>/variants/<slot>/`.
+
 3. **Link-target enrichment.** After `component-match.json` is emitted, run `skills/d2c-build-flow/scripts/pick-link-target.js` (or call the exported `pickLinkTarget(...)`). The script accepts two target shapes — pass exactly one:
    - `toNodeId` — the next page's node id (route navigation).
    - `stepDelta` — a signed integer, typically `+1` (Next) or `-1` (Back), for stepper-internal advancement. Back targeting uses a different text regex (`/back|previous|prev|return/i`) so a stepper with both buttons visible wires each correctly.
@@ -367,6 +620,7 @@ Skip page-level Phase 2 for any page whose `not_supported_detected[]` entry the 
    - If the page's `component-match.json` contains a node with `link_target`, wire the handler (see §"Page files"). For `link_target.edge_kind === "step_delta"`, wire to the stepper provider's `next()`/`back()` instead of `router.push` (see §"Stepper groups" in `framework-react-next.md`).
    - If the page is inside a layout, place it at `app/<route>/page.tsx` relative to the layout directory and do NOT re-emit the shell — Next's App Router composes automatically.
    - If the page is `page_type: "stepper_group"`, do NOT delegate to `/d2c-build` per-page codegen. Instead emit the stepper per §"Stepper groups (single-route multi-step)" in `framework-react-next.md`: one `app/<group_route>/page.tsx`, per-step files under `_steps/`, and a provider under `_state/`. Each step's IR comes from its own `/d2c-build` Phase 2 run (keyed by the step's `node_id`), but the output shape is a step component, not a route page.
+   - When any step inside a stepper group carries `state_variants`, emit the per-step fallback files and wrap that step's slot in the `page.tsx` step array per §"Per-step state variants" in `framework-react-next.md`. Path A (Next file convention) does not apply to stepper steps — `loading.tsx` / `error.tsx` are per-route-segment and cannot target a step index inside a single-route stepper. Steps without `state_variants` render unwrapped so the identity guarantee holds for loaded-only steppers.
 
 ### Rules carried over from `/d2c-build`
 
@@ -382,11 +636,90 @@ All six non-negotiables apply per page exactly as in `/d2c-build`. Reuse, tokens
 
 ## Phase 4 — Per-page Visual Verification
 
-For each page, run the existing `/d2c-build` Phase 4 loop unchanged: Playwright screenshot → `pixeldiff.js` → auto-fix up to `max-rounds` times → pass at `threshold`%.
+For each page, run the existing `/d2c-build` Phase 4 loop (Playwright screenshot → `pixeldiff.js` → auto-fix up to `max-rounds` times → pass at `threshold`%) once per declared variant.
 
-- Per-page score, per-page pass/fail, per-page auto-fix rounds.
-- One page's regression does not reset another page's state.
-- All Phase 4 failure modes from `skills/d2c-build/references/failure-modes.md` apply verbatim.
+- Per-page-per-variant score, pass/fail, auto-fix rounds.
+- One variant's regression does not reset another variant's state, and one page's regression does not reset another page's state.
+- All Phase 4 failure modes from `skills/d2c-build/references/failure-modes.md` apply verbatim per variant.
+
+### Flow-level audit file (required)
+
+Before running any variant, create `<run-dir>/flow/audit.json` with `{"pages": [], "warnings": []}`. Then for each page (routes mode and hybrid mode) or each stepper step that carries `state_variants` (stepper mode and hybrid mode):
+
+1. **Seed the page entry.** Push `{"node_id": "<host node_id>", "route": "<route or group_route[/#step-<n>]>", "variants": []}` onto `audit.json.pages[]`. Do this once per host before the variant loop — `/d2c-build` appends to `variants[]` but does NOT create page entries.
+2. **Iterate slots alphabetically** (`empty`, `error`, `loaded`, `loading`), skipping any slot not declared on the host. For every non-stub variant:
+   - Run `/d2c-build` Phase 4 inside the variant's run directory (`.claude/d2c/runs/<ts>/pages/<node_id>/variants/<slot>/` for pages, `.claude/d2c/runs/<ts>/pages/<group_node_id>/steps/<step_node_id>/variants/<slot>/` for stepper steps; for `loaded` on a route-level page the run directory is the per-page root, matching the identity-gate layout).
+   - Pass `audit_path: "<absolute-or-project-root-relative path to flow/audit.json>"` in the structured payload so `/d2c-build` Phase 6 can append this variant's result entry (§"Flow-level audit append" in `skills/d2c-build/SKILL.md`).
+   - Auto-fix is bounded by the same `--max-rounds` as today. A variant that exhausts its budget fires the standard Phase 4 failure; other variants continue.
+3. **Stub entries (error only).** Append `{ "slot": "error", "stub_emitted": true }` to the host's `variants[]` directly (no `/d2c-build` dispatch, no screenshot, no pixel-diff). The placeholder component already exists per Phase 3 §"Error stub" — the audit row flags it so Phase 6 and the P2.4 audit surface can call it out. Simultaneously push an `error_stub_emitted` warning: `{ kind: "error_stub_emitted", route: "<host route>", slot: "error", node_id: "<host node_id>", recommendation: "Replace the dashed-border placeholder at <emitted file path> with a real error design before shipping." }`.
+4. **Drain staged warnings (P2.4).** After seeding all page entries and running the variant loop, iterate the in-memory `flow_graph._pending_audit_warnings[]` list (populated by Phase 1b §"Fallback: sibling-name detection" and by Phase 3 codegen hooks during the same run) and push each into `audit.json.warnings[]`, de-duplicating by `(kind, route, slot, node_id)` — first entry wins. The field is in-memory only: `flow-graph.json` itself is written WITHOUT `_pending_audit_warnings` (the schema's `additionalProperties: false` would reject it, and future runs should not inherit a snapshot from a stale run). When `--skip-phase4` is passed, stage the list to a sidecar file at `<run-dir>/flow/pending-audit-warnings.json` instead, and the next Phase 4 run (manual rerun or subsequent `/d2c-build-flow`) loads + drains that sidecar before starting its variant loop; delete the sidecar on successful drain. Loaded-only flows have no staged warnings and no stubs, so `audit.json.warnings` is `[]`.
+
+### Identity guarantee
+
+Loaded-only flows (no `state_variants` on any host) still produce `audit.json` so Phase 6 has a single source of truth, but each page entry carries exactly one `{slot: "loaded", …}` row. The Phase 6 report collapses single-variant pages back to the pre-change one-row-per-page layout, so loaded-only output is unchanged from the user's perspective (P0.8 identity gate still holds at the report level; the new `audit.json` file is additive scaffolding, not user-visible churn).
+
+### Audit shape (canonical)
+
+```json
+{
+  "pages": [
+    {
+      "node_id": "1:2",
+      "route": "/dashboard",
+      "variants": [
+        { "slot": "empty",   "final_score": 99.1, "rounds": 1, "status": "pass" },
+        { "slot": "error",   "stub_emitted": true },
+        { "slot": "loaded",  "final_score": 98.2, "rounds": 3, "status": "pass" },
+        { "slot": "loading", "final_score": 96.5, "rounds": 2, "status": "pass" }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "kind": "error_stub_emitted",
+      "route": "/dashboard",
+      "slot": "error",
+      "recommendation": "Replace the dashed-border placeholder at app/dashboard/error.tsx with a real error design before shipping."
+    }
+  ]
+}
+```
+
+Slot ordering inside each page's `variants[]` is alphabetical — matches the IR serialisation order and keeps diffs stable across runs.
+
+### Warnings surface (P2.4)
+
+`audit.json.warnings[]` is the single channel that aggregates non-failing signals the user needs to review before shipping. A warning is never a test failure — Phase 4 pixel-diff failures and Phase 4b nav-smoke failures stay in their own channels. Warnings exist so the report can surface soft issues (stubs, fallback ambiguity, mobile drift, a11y gaps) without burying them in per-variant rows.
+
+Canonical fields per entry:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `kind` | string | yes | Enumerated — see table below. Stable across runs so downstream tooling can filter. |
+| `route` | string | yes | The affected route (`"/dashboard"`, `"/checkout#step-2"`, etc.). Use the step-anchored form for stepper-step warnings so one group with mixed warnings is not collapsed. |
+| `slot` | `"empty" \| "error" \| "loaded" \| "loading"` | when slot-scoped | Omit for warnings that aren't tied to a specific variant (e.g. a group-level navigation warning). |
+| `node_id` | string | when available | The Figma node id of the offending frame. Lets the user jump from the report to the design. Omit when the warning is about something that doesn't map to a single frame (e.g. missing mobile counterpart on a slot that has no mobile frame at all). |
+| `recommendation` | string | yes | Human-readable action the user should take. One sentence. Present tense imperative ("Replace …", "Add …", "Disambiguate …"). |
+| `details` | object | when the warning kind defines one | Structured extras for specific kinds (see per-kind shapes below). Keep shallow — one level deep. |
+
+Warning kinds (closed set — extend by adding a row here and wiring the producer phase, never by inventing kinds ad hoc):
+
+| `kind` | Producer phase | `slot` required | `details` shape |
+|---|---|---|---|
+| `error_stub_emitted` | Phase 4 (stub row) | yes (`"error"`) | `{}` |
+| `fallback_unmatched_sibling` | Phase 1b §"Fallback: sibling-name detection" | no | `{ name: string, candidate_slot?: "empty"\|"error"\|"loaded"\|"loading" }` |
+| `fallback_collision` | Phase 1b §"Fallback: sibling-name detection" | yes | `{ name: string, other_node_id: string }` — `node_id` on the warning points at the losing sibling, `other_node_id` at the winner. |
+| `missing_mobile_counterpart` | Phase 3 §"Mobile × state composition" | yes | `{ mobile_strategy: "inherit-from-loaded" }` — matches the audit-hook payload from `framework-react-next.md`. |
+| `a11y_missing_heading` | Phase 3 §"Accessibility" (empty variant) | yes (`"empty"`) | `{ reason: "no-heading-in-empty-frame" }` — emitted when the empty variant's Figma frame has no text large enough to serve as a heading and codegen had to insert a `sr-only` fallback. |
+
+Rules:
+
+1. **Phase 4 writes stub warnings.** When the Phase 4 variant loop appends a `{ "slot": "error", "stub_emitted": true }` row to a page's `variants[]`, it also pushes an `error_stub_emitted` warning with the host's route and `node_id`. One page with a stubbed error variant = one audit row + one warning.
+2. **Phase 1b writes fallback warnings.** When the fallback sibling-name detector returns `unmatched_siblings[]`, the clarification phase surfaces them to the user — siblings the user declines to attach or that collide with an already-matched slot are recorded as `fallback_unmatched_sibling` / `fallback_collision` warnings before Phase 2a writes the IR. The warnings persist into `audit.json` via the Phase 4 seeding step (Phase 2a carries them forward on `flow_graph._pending_audit_warnings[]`, consumed and cleared by Phase 4's audit-seeding pass).
+3. **Phase 3 writes codegen warnings.** When Phase 3 emits the mobile-inherit strategy or a `sr-only` heading fallback, it stages the corresponding warning on `flow_graph._pending_audit_warnings[]`. Phase 4's audit seed consumes the staged list the same way as Phase 1b's entries. Staging (not direct write) keeps Phase 3 independent of whether Phase 4 runs — e.g. `--skip-phase4` preserves the intent to warn and re-emits on the next run.
+4. **De-duplication.** Warnings are de-duplicated by `(kind, route, slot, node_id)` at seed time — Phase 2a and Phase 3 may both stage for the same `(route, slot)` independently; only the first wins. Rationale: prevents noise when the same `(route, slot)` triggers both a fallback ambiguity and a mobile-counterpart issue — the user fixes one at a time.
+5. **Phase 6 surfaces warnings.** See §Phase 6 step "Warnings table" — warnings render as a separate table below the per-variant summary, grouped by `kind`. Identity-collapse flows (loaded-only everywhere, no warnings) omit the warnings section entirely, preserving the pre-change report shape.
+6. **Schema stability.** `warnings` is always present on `audit.json` (empty array on loaded-only flows with no stubs or warnings from Phase 3). Downstream tooling can rely on the field without null checks. New warning kinds require a row in the table above and a producer phase — never add a one-off warning inline without documenting it here.
 
 ---
 
@@ -453,11 +786,23 @@ The flow-level report section is required. It sits at the top of the build summa
 2. **Flow diagram (B-FLOW-REPORT-DIAGRAM).** Emit a Mermaid `flowchart LR` block rendered by `skills/d2c-build-flow/scripts/render-flow-diagram.js <run-dir>/flow/flow-graph.json`. Solid arrows = wired edges, dashed arrows = inferred, labels annotate `loop`, `if <condition>`, etc. Fall back to `--format ascii` when the report consumer can't render Mermaid.
 3. **Flow-graph diff (B-FLOW-REPORT-DIFF).** If `<run-dir>/flow/flow-graph.json` has a predecessor (a previous run-dir under `.claude/d2c/runs/`), render the diff with `skills/d2c-build-flow/scripts/diff-flow-graph.js <previous>/flow/flow-graph.json <run-dir>/flow/flow-graph.json`. Show `no changes` when nothing differs.
 4. **Cross-file dependencies (B-FLOW-CROSS-FILE).** When `flow-graph.cross_file === true`, list every unique `file_key` from `flow-graph.file_keys[]` with the pages it gates.
-5. **Page scores table.** Columns: `Step`, `Route`, `Pixel-diff %`, `Rounds used`, `Pass/Fail`. Add a `Mobile %` column when any page declares `mobile_variant` (B-FLOW-MOBILE-VARIANT).
+5. **Page scores table.** Columns: `Step`, `Route`, `State variant`, `Pixel-diff %`, `Rounds used`, `Pass/Fail`. Add a `Mobile %` column when any page declares `mobile_variant` (B-FLOW-MOBILE-VARIANT).
+
+   Source: `<run-dir>/flow/audit.json` (Phase 4 writes it). Render rules:
+   - One row per `(page, variant)` pair. A page with N non-stub variants renders N rows; the `Step` / `Route` cells are left blank on continuation rows (or rendered once with `rowspan` when the consumer supports it) so the variant list reads as a group under its host.
+   - `State variant` column values: `loaded`, `loading`, `empty`, `error`, or `error (stub)` for stub entries.
+   - Stub rows render `—` in the `Pixel-diff %` / `Rounds used` / `Pass/Fail` columns (nothing was diffed) and carry the annotation `stub emitted — replace before shipping` in the surrounding prose.
+   - **Identity collapse:** a page with only a single `loaded` variant (the whole flow is loaded-only) renders as today — one row per page, no `State variant` column header. Detect this by scanning `audit.json.pages[]` — if every entry's `variants` array has length 1 and slot `"loaded"`, omit the `State variant` column entirely. This preserves the pre-change report shape for the identity-gate fixtures.
 6. **Reuse metric.** `X / Y components reused across ≥2 pages (Z%)`. Computed by `skills/d2c-build-flow/scripts/flow-reuse-metric.js <run-dir>` — reads every per-page `component-match.json` and tallies distinct source paths. Stdout format: `reused: <N>`, `total: <M>`, `percent: <P>`.
 7. **Navigation test result.** `PASS` / `FAIL: <edges>` / `N/A (not executed)`. Plus counts of wired vs inferred edges, plus each autofix-round diagnosis from `nav-autofix-plan.js` when the autofix loop ran.
 8. **Not-supported detections.** Every entry in `flow-graph.not_supported_detected[]` with its `kind`, `node_id`, and `reason`.
 9. **Warnings.** Any `warning`-severity failure from Phase 1 (e.g. `F-FLOW-ROUTE-ESCAPES-BASE`) and any Phase 2a informs (`F-FLOW-SHELL-DIVERGENT`, `F-FLOW-PROTOTYPE-CONTRADICTS-ORDER`, `F-FLOW-DISCOVERY-CYCLE`).
+10. **State-variant warnings table (P2.4).** Render a separate markdown table when `audit.json.warnings[]` is non-empty. Columns: `Kind`, `Route`, `Slot`, `Node`, `Recommendation`. Render rules:
+    - Group rows by `kind` in this order (matches the warning-kinds table in Phase 4): `error_stub_emitted`, `fallback_unmatched_sibling`, `fallback_collision`, `missing_mobile_counterpart`, `a11y_missing_heading`. Unknown kinds sort alphabetically after the known ones — the producer added a row to the table in Phase 4 without updating this ordering, and that's worth surfacing.
+    - Within a kind, sort by `route` ascending, then by `slot` alphabetically (`empty`, `error`, `loaded`, `loading`), then by `node_id` ascending. Deterministic so repeated runs on unchanged inputs produce byte-identical reports.
+    - `Slot` cell renders `—` when the warning is not slot-scoped; `Node` renders `—` when `node_id` is absent.
+    - Append a one-line header above the table: `<N> state-variant warnings — review before shipping.` (singular `warning` when N=1.) When N=0 (common for loaded-only flows and for fully-resolved full-variant flows), omit the entire section — no empty header, no empty table.
+    - **Identity preservation:** the section never appears on loaded-only flows because Phase 4 never stages warnings on them (no stubs, no fallback, no mobile-counterpart drift on slots that don't exist). Combined with the identity collapse on the page scores table (rule 5), loaded-only flows produce the pre-change report shape exactly.
 
 ### Update `design-tokens.json.components[]`
 

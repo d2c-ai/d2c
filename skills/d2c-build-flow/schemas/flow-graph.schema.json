@@ -134,6 +134,10 @@
       "items": {
         "$ref": "#/definitions/mask_region"
       }
+    },
+    "project_conventions": {
+      "$ref": "#/definitions/project_conventions",
+      "description": "Detected project conventions used when the flow emits per-variant composition (Phase 2a project-convention detector). Absent when no page declares state_variants — loaded-only flows do not need convention data. When present, consumed by per-variant dispatch into /d2c-build and by Phase 3 codegen to decide between Next.js file-convention layout (loading.tsx/error.tsx) and inline Suspense+ErrorBoundary composition."
     }
   },
   "additionalProperties": false,
@@ -242,6 +246,10 @@
             },
             "additionalProperties": false
           }
+        },
+        "state_variants": {
+          "$ref": "#/definitions/state_variants",
+          "description": "Per-page UI state variants (loaded / loading / empty / error / initial). Omitted entirely when the user declared only a loaded frame — loaded-only pages serialize identically to pre-state-variants IR. When present, `loaded` is required and mirrors this page's primary frame (figma_url + node_id); other slots are optional. Populated by the Phase 2a state-variant extractor; consumed by per-variant /d2c-build dispatch in Phase 2 and by Phase 3 codegen."
         }
       },
       "additionalProperties": false
@@ -536,6 +544,10 @@
           "minimum": 0,
           "maximum": 1,
           "description": "Per-step confidence score when the step was auto-assigned to this group by detect-mode.js. Null for explicit groups."
+        },
+        "state_variants": {
+          "$ref": "#/definitions/state_variants",
+          "description": "Per-step UI state variants (loaded / loading / empty / error / initial) inside a stepper group. Same shape as pages[].state_variants. Omitted when only the loaded frame was declared. When present, `loaded.node_id` matches this step's node_id and figma_url."
         }
       },
       "additionalProperties": false
@@ -568,6 +580,168 @@
         }
       },
       "additionalProperties": false
+    },
+    "state_variants": {
+      "type": "object",
+      "description": "Five-slot state-variant container attached to a page or stepper step. `loaded` is required — it mirrors the host's primary Figma frame and gives the happy-path render. `initial`, `loading`, `empty`, and `error` are optional: each slot is emitted only when the user declared it. Slots are serialized alphabetically (empty, error, initial, loaded, loading) for diff stability. The container itself is omitted entirely when only `loaded` would resolve — in that case the host keeps the pre-state-variants shape so legacy flows produce byte-identical IR.",
+      "required": ["loaded"],
+      "additionalProperties": false,
+      "properties": {
+        "empty": {
+          "$ref": "#/definitions/variant_entry",
+          "description": "Empty-state variant: rendered when the page's primary data collection is zero-length. Codegen wires this as a data-driven branch inside the loaded render (not a Suspense/ErrorBoundary boundary). No trigger is required — the trigger is 'data length is zero'."
+        },
+        "error": {
+          "$ref": "#/definitions/variant_entry_error",
+          "description": "Error-state variant: rendered when the loaded render throws or its data hook rejects. Carries a mandatory `trigger` describing when it fires. May be a `stub` (declared without a Figma URL) — codegen emits an unthemed dashed placeholder in that case."
+        },
+        "initial": {
+          "$ref": "#/definitions/variant_entry",
+          "description": "Initial-state variant: the pre-fetch / pre-action render shown before any data request has been initiated or any user input has been given (e.g. a search page before the query is typed, a checkout step before Pay is clicked). Distinct from `loading` (fetch in-flight) and `empty` (fetch completed, zero results). Codegen wires this as a data-driven branch inside the loaded render (not a Suspense/ErrorBoundary boundary), condition sourced from project_conventions.data_fetching.kind — e.g. `status === 'idle'` for React Query. No trigger is required — the trigger is structural ('no fetch initiated yet'). MUST NOT be a stub; an `initial` declaration without a Figma URL triggers F-FLOW-VARIANTS-STUB-NON-ERROR."
+        },
+        "loaded": {
+          "$ref": "#/definitions/variant_entry",
+          "description": "Loaded-state variant: the happy-path render. node_id and figma_url MUST equal the host page's / stepper step's primary frame. This slot is always required when `state_variants` is present."
+        },
+        "loading": {
+          "$ref": "#/definitions/variant_entry_with_trigger",
+          "description": "Loading-state variant: rendered while the host's data is in flight. Carries a mandatory `trigger` describing when it fires (e.g. 'while fetching user dashboard data'). Codegen wires this as a Suspense fallback or a client-side boundary fallback depending on project_conventions."
+        }
+      }
+    },
+    "variant_entry": {
+      "type": "object",
+      "required": ["node_id", "figma_url"],
+      "additionalProperties": false,
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "description": "Figma node id of the variant's frame (colon form, e.g. '1:234'). For the `loaded` slot this MUST equal the host page's / stepper step's node_id. For other slots it should be distinct."
+        },
+        "figma_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Exact Figma URL the user supplied (or that the fallback detector resolved) for this variant's frame."
+        },
+        "file_key": {
+          "type": ["string", "null"],
+          "description": "Figma file key (path segment after /design/ or /file/). Null when the URL could not be parsed. MVP rejects cross-file variants — all slots on one host must share a file_key."
+        },
+        "content_region_node_id": {
+          "type": ["string", "null"],
+          "description": "Reserved for P3.2 (per-region granularity). When non-null, indicates the subregion of the loaded frame this variant swaps in place of. Ignored by MVP codegen (whole-page swap)."
+        }
+      }
+    },
+    "variant_entry_with_trigger": {
+      "type": "object",
+      "required": ["node_id", "figma_url", "trigger"],
+      "additionalProperties": false,
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "description": "Figma node id of the variant's frame."
+        },
+        "figma_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Exact Figma URL the user supplied for this variant's frame."
+        },
+        "file_key": {
+          "type": ["string", "null"],
+          "description": "Figma file key; MVP requires it match the host's file_key."
+        },
+        "content_region_node_id": {
+          "type": ["string", "null"],
+          "description": "Reserved for P3.2 (per-region granularity)."
+        },
+        "trigger": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable description of when this state fires (e.g. 'while fetching user dashboard data', 'during form submission', 'when the POST /checkout call is in flight'). Mandatory. Used to (a) give /d2c-build per-variant semantic context, (b) decide where the boundary lives in the tree, and (c) appear in audit output for reviewer context."
+        }
+      }
+    },
+    "variant_entry_error": {
+      "type": "object",
+      "required": ["trigger"],
+      "additionalProperties": false,
+      "description": "Error variant: either a full entry (node_id + figma_url + trigger) or a stub (stub: true + trigger) with no Figma design yet. Semantic validator enforces the mutex — stub entries MUST NOT carry node_id/figma_url, and non-stub entries MUST carry both.",
+      "properties": {
+        "node_id": {
+          "type": "string",
+          "description": "Figma node id of the error frame. Required when stub is false or absent; MUST NOT be present when stub is true."
+        },
+        "figma_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Figma URL of the error frame. Required when stub is false or absent; MUST NOT be present when stub is true."
+        },
+        "file_key": {
+          "type": ["string", "null"],
+          "description": "Figma file key; ignored for stubs."
+        },
+        "content_region_node_id": {
+          "type": ["string", "null"],
+          "description": "Reserved for P3.2 (per-region granularity)."
+        },
+        "stub": {
+          "type": "boolean",
+          "description": "When true, signals that the user declared an error state without supplying a Figma design. Codegen emits ErrorStatePlaceholder (unthemed dashed box + dev-mode console.warn). When false or absent, this is a fully-designed error variant."
+        },
+        "trigger": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable description of when the error state shows (e.g. 'when the dashboard fetch returns a 5xx'). Mandatory for both full and stub entries — knowing WHEN matters even if the design is missing."
+        }
+      }
+    },
+    "project_conventions": {
+      "type": "object",
+      "required": ["component_type", "error_boundary", "data_fetching"],
+      "additionalProperties": false,
+      "description": "Snapshot of the target project's conventions, detected by detect-project-conventions.js during Phase 2a. Consumed by per-variant /d2c-build dispatch and Phase 3 codegen. Never prescribes — mirrors what the project already does.",
+      "properties": {
+        "component_type": {
+          "type": "string",
+          "enum": ["server", "client", "mixed"],
+          "description": "Dominant React component type for page files in the target project. 'server' = async Server Components with no 'use client' directive; 'client' = files start with 'use client'; 'mixed' = both appear roughly equally OR no existing page.tsx files were found. When 'mixed', the clarification phase must ask the user which to target."
+        },
+        "error_boundary": {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "description": "How the target project handles render-time errors in the page tree.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["next-file-convention", "react-error-boundary", "custom-class", "none"],
+              "description": "'next-file-convention' = project uses Next.js app-router error.tsx files; 'react-error-boundary' = react-error-boundary package is a dependency and used in source; 'custom-class' = project defines its own class component extending React.Component with componentDidCatch; 'none' = no boundary detected, clarification phase asks the user."
+            },
+            "import_path": {
+              "type": ["string", "null"],
+              "description": "Import specifier to use when wrapping content in the detected boundary (e.g. 'react-error-boundary' or '@/components/error-boundary'). Null for 'next-file-convention' (file system wires it) and 'none'."
+            }
+          }
+        },
+        "data_fetching": {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "description": "How the target project fetches data in page trees.",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["server-component-fetch", "react-query", "swr", "custom-hook", "none"],
+              "description": "'server-component-fetch' = async Server Components with top-level await fetch/db calls; 'react-query' = @tanstack/react-query is a dep and useQuery appears in source; 'swr' = swr package with useSWR; 'custom-hook' = project has its own hooks matching 'use[A-Z].*Data|Query|Fetch' pattern; 'none' = no data-fetch pattern detected."
+            },
+            "example_import": {
+              "type": ["string", "null"],
+              "description": "Representative import line observed in existing source (e.g. \"import { useQuery } from '@tanstack/react-query'\"). Emitted verbatim in per-variant /d2c-build prompts so generated code matches project idioms. Null when kind is 'none' or 'server-component-fetch'."
+            }
+          }
+        }
+      }
     }
   }
 }

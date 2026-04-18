@@ -423,6 +423,221 @@ Rules:
 
 ---
 
+## State variants (loaded / loading / empty / error / initial)
+
+When a page in `flow-graph.json` carries a `state_variants` block, codegen composes per-variant components using **whatever the project already does** — `flow_graph.project_conventions` decides the layout. This section is the authoritative spec for the two paths. If the flow has no `state_variants` (the identity case), skip the entire section.
+
+### Shared rules (both paths)
+
+- Every variant component is a **pure presentational component**. Its JSX and styling come from the Figma frame captured under the slot's `component-match.json`. It does NOT fetch data, track loading state, or compose routing.
+- The `loaded` slot is today's primary render — no new component, no rewrite. The identity guarantee (P0.8) says a page with only `loaded` produces byte-identical output to the pre-state-variants pipeline.
+- `empty` is **never** wrapped in a boundary. It is a data-driven branch inside the `loaded` component: `if (data.length === 0) return <DashboardEmpty />` at the top of the loaded JSX. The trigger is "data length is zero".
+- `initial` is **never** wrapped in a boundary either. It is the pre-fetch / pre-action render — shown before any data request has been initiated or any user input has been given (e.g. a search page before the query is typed, a checkout step before Pay is clicked). Like `empty`, it is a data-driven branch at the top of the loaded JSX, but keyed off an **idle** condition sourced from `project_conventions.data_fetching.kind`:
+  - `react-query` → `query.status === 'idle'` (or `fetchStatus === 'idle' && !data` when using `useQuery({ enabled: false })` patterns)
+  - `swr` → `!data && !error && !isValidating` with the fetcher gated behind the feature-key (e.g. `useSWR(query ? key : null, fetcher)`)
+  - `server-component-fetch` / `custom-hook` / `none` → an internal `hasRequested` boolean default-false, flipped to `true` on the user action that triggers the fetch
+  Distinct from `loading` (fetch in flight) and `empty` (fetch completed, zero results). MUST NOT carry `aria-busy` — that attribute belongs to `loading` only. When both `initial` and `empty` are declared, the initial branch runs first (pre-fetch wins over post-fetch-empty).
+- Variants live alongside the loaded page — no `states.tsx` bundle, no `<StateSwitch state={...}>`, no `PageState` discriminated union threaded through props.
+
+### Path A — `project_conventions.component_type === "server"` AND `error_boundary.kind === "next-file-convention"`
+
+Use Next.js App Router's built-in `loading.tsx` / `error.tsx` file conventions. The framework wires `<Suspense>` and the error boundary automatically — the flow only emits the files.
+
+File layout per route (e.g. `/dashboard`):
+
+```
+app/dashboard/
+  page.tsx        ← async Server Component (loaded + inline initial + empty branches)
+  loading.tsx     ← Server Component, rendered while page.tsx suspends
+  error.tsx       ← Client Component ('use client' required by Next.js)
+  _initial.tsx    ← initial branch component (imported by page.tsx when declared)
+  _empty.tsx      ← empty branch component (imported by page.tsx when declared)
+```
+
+`page.tsx` — loaded + initial + empty (Server Components typically fetch eagerly, so `initial` is rare here; it appears when a page takes `searchParams` that gate the fetch — e.g. `?q=` on a search route):
+
+```tsx
+import { getDashboardData } from '@/lib/dashboard';          // or detected data_fetching.example_import
+import { DashboardInitial } from './_initial';
+import { DashboardEmpty } from './_empty';
+
+export default async function DashboardPage({ searchParams }: { searchParams: { q?: string } }) {
+  // initial branch — fetch not yet triggered (no query param). Skip when `searchParams` isn't gating the fetch.
+  if (!searchParams.q) return <DashboardInitial />;
+  const data = await getDashboardData(searchParams.q);
+  if (data.items.length === 0) return <DashboardEmpty />;
+  return (
+    <main>
+      {/* loaded frame JSX from component-match.json */}
+    </main>
+  );
+}
+```
+
+- If `state_variants.empty` is absent, drop the zero-length branch and the import entirely.
+- If `state_variants.initial` is absent, drop the pre-fetch branch and the import entirely. When `initial` is present but the page is a plain Server Component with no gating prop, convert the page to a Client Component path (Path B) so the idle condition can come from the data-fetching hook.
+- `_initial` / `_empty` are sibling files (underscore prefix keeps them off Next's router). Content comes from `variants/initial/component-match.json` and `variants/empty/component-match.json`.
+
+`loading.tsx` — Server Component skeleton:
+
+```tsx
+// no 'use client' directive — Server Component renders during Suspense
+export default function DashboardLoading() {
+  return (
+    <div aria-busy="true">
+      {/* loading frame JSX from variants/loading/component-match.json */}
+    </div>
+  );
+}
+```
+
+`error.tsx` — Client Component:
+
+```tsx
+'use client';
+// Next.js reads default export; `error` + `reset` props are part of the file convention.
+export default function DashboardError({ error, reset }: { error: Error; reset: () => void }) {
+  return (
+    <div role="alert" aria-live="assertive">
+      {/* error frame JSX from variants/error/component-match.json */}
+      <button onClick={reset}>Try again</button>
+    </div>
+  );
+}
+```
+
+- Prepend `'use client'` even if the project is mostly Server Components. Next.js refuses to treat a non-client `error.tsx` as an error boundary.
+- The `error` prop is typed `Error` (or the project's `unknown` convention). The `reset` prop must be wired to a button or link — "Try again" is the default copy unless the Figma frame shows different text.
+- When `state_variants.error.stub === true`, emit `ErrorStatePlaceholder` (see §"Error stub" below) as the default export.
+
+### Path B — Client Components OR `error_boundary.kind !== "next-file-convention"`
+
+Use inline composition inside `page.tsx`: `<Suspense>` for loading, the detected error-boundary for error. Fallback components live as sibling files with an `_` prefix.
+
+File layout:
+
+```
+app/dashboard/
+  page.tsx        ← composes <Suspense> + <ErrorBoundary>
+  _loading.tsx    ← loading fallback (Client or Server depending on project convention)
+  _empty.tsx      ← empty branch component (imported by whichever component owns the data)
+  _error.tsx      ← error fallback
+```
+
+`page.tsx` — composition:
+
+```tsx
+'use client';                                                 // only if project convention is client
+import { Suspense } from 'react';
+import { ErrorBoundary } from '<import_path>';                // from project_conventions.error_boundary.import_path
+import { DashboardLoaded } from './_loaded';                  // when Client projects split the loaded body out
+import { DashboardLoading } from './_loading';
+import { DashboardError } from './_error';
+
+export default function DashboardPage() {
+  return (
+    <ErrorBoundary FallbackComponent={DashboardError}>
+      <Suspense fallback={<DashboardLoading />}>
+        <DashboardLoaded />
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+```
+
+- Import the exact specifier in `project_conventions.error_boundary.import_path`. For `react-error-boundary` that is literally `'react-error-boundary'`. For `custom-class`, use the relative path the detector recorded.
+- Path B is required whenever `component_type === "client"` (Next.js client-only pages cannot use the file convention).
+- For `data_fetching.kind === "react-query"`, `<Suspense>` fires via `useSuspenseQuery`. For `swr`, use `suspense: true`. For `custom-hook` / `none`, the hook must throw promises / errors on its own (document the expectation but don't synthesise the hook).
+
+### Error stub (`state_variants.error.stub === true`)
+
+When the user declared an error state without supplying a Figma URL, do NOT dispatch `/d2c-build`. Instead emit a placeholder directly from Phase 3:
+
+```tsx
+'use client';
+import { useEffect } from 'react';
+
+export default function DashboardError({ error, reset }: { error: Error; reset: () => void }) {
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'production') {
+      // eslint-disable-next-line no-console
+      console.warn('[d2c] ERROR VARIANT NOT YET DESIGNED — /dashboard — replace with real content before shipping', error);
+    }
+  }, [error]);
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      style={{
+        border: '2px dashed crimson',
+        padding: '1.5rem',
+        fontFamily: 'monospace',
+        background: 'none',
+      }}
+    >
+      ERROR VARIANT NOT YET DESIGNED — /dashboard — replace with real content before shipping.
+      <button onClick={reset} style={{ marginTop: '1rem' }}>Try again</button>
+    </div>
+  );
+}
+```
+
+- The dashed border + monospace text + `console.warn` is intentionally obnoxious. The component must remain in the production bundle so reviewers catch it in visual QA — do NOT gate the render on `NODE_ENV`.
+- When rendered under Path B, expose the stub as a named export `<PageName>ErrorPlaceholder` and import it into `page.tsx` as the `FallbackComponent`.
+- The stub never runs through Phase 4 pixel-diff — the audit surfaces `stub_emitted: true` for the page instead (P1.4).
+
+### Accessibility (P2.1)
+
+State variants ship with live-region semantics so screen readers announce transitions between slots. Apply these rules in Phase 3; the Phase 5 audit rechecks them per variant and escalates to `<run-dir>/flow/audit.json` warnings (see §"Audit surface" in `SKILL.md`).
+
+**Loading variant root:**
+- Emit `aria-busy="true"` on the outermost rendered element of `<PageName>Loading` (or `<PageName>Step<N>Loading` in stepper form).
+- If the Figma frame's root already has an ARIA role (e.g. from a design-system `Card` reused as the skeleton wrapper), preserve the role and set `aria-busy` alongside it — DO NOT overwrite the role.
+- Do NOT add `aria-live` on loading roots — the Suspense fallback announces via the error/status channel already; adding it here produces double-announcement.
+
+**Error variant root:**
+- Emit `role="alert"` AND `aria-live="assertive"` on the outermost rendered element of `<PageName>Error`.
+- When the Figma frame uses a design-system `Alert` / `Banner` component that already carries `role="alert"`, keep the DS component's role and layer `aria-live="assertive"` only if the DS component doesn't already declare one. Never emit nested `role="alert"` elements (double-wrapping is invalid and silent for most screen readers).
+- Wire the "Try again" button (or the Figma frame's equivalent CTA) to the Next.js `reset` prop (Path A) or the ErrorBoundary `resetErrorBoundary` prop (Path B). An error variant with no recovery affordance is an accessibility hole — flag in audit.
+
+**Empty variant root:**
+- The component MUST include a semantic heading (`<h1>` or `<h2>`) announcing the zero-data scenario (e.g. "No items yet", "Nothing to show"). This is how screen-reader users discover that the page rendered an empty state rather than failing to load.
+- Heading detection (Phase 3 self-check): inspect the `empty` variant's `component-match.json` for a node with `semantic_role: "heading"` or a Figma text style matching `design-tokens.typography` entries tagged `role: "heading"`. If none exists but the Figma frame has a text node sized ≥ the token value for `typography.h2.size`, promote it to an `<h2>`.
+- If no heading candidate exists at all (empty frame is imagery only, or text is sub-heading size), emit a **visually hidden** `<h2 className="sr-only">` with copy derived from the variant's `trigger` (e.g. `trigger: "when the user has zero items"` → `<h2 className="sr-only">No items</h2>`), AND stage an audit warning on `flow_graph._pending_audit_warnings[]` for Phase 4 to persist: `{ kind: "a11y_missing_heading", route: "<route>", slot: "empty", node_id: "<empty variant node_id>", recommendation: "Add a visible heading to the empty frame in Figma (at or above typography.h2.size) or hand-edit the generated sr-only copy to match designer-approved text.", details: { reason: "no-heading-in-empty-frame" } }`. See SKILL.md §"Warnings surface (P2.4)" for the canonical shape and how Phase 4 drains the staged list into `audit.json.warnings[]`.
+
+**Initial variant root:**
+- MUST NOT emit `aria-busy` — the page is not busy, it is waiting for input or intent. Emitting `aria-busy` on an idle page lies to assistive tech.
+- When the frame contains a visible call-to-action (search input, CTA button), preserve the semantic element (`<input>`, `<button>`) from the component-match IR — the initial render is often interactive.
+- When the frame is purely informational ("Enter a query to begin"), emit a semantic heading (`<h1>`/`<h2>`) describing the affordance — same heading-detection logic as the empty variant above (promote the largest text node, or emit a visually hidden `<h2 className="sr-only">` derived from the Figma frame title if no text candidate exists).
+- No `role="alert"` and no `aria-live` — the initial render is the page's first meaningful paint, not a status announcement.
+
+**Stub variant:** the placeholder already emits `role="alert"` + `aria-live="assertive"` and its own retry button — no additional a11y work. The dashed border + monospace copy makes the stub visually distinct; do NOT suppress those in the name of polish.
+
+**Audit hook:** for every variant file Phase 3 emits, re-scan the generated JSX for the expected attribute. A missing `aria-busy` on loading, missing `role="alert"` on error, or missing heading on empty stages the corresponding warning on `flow_graph._pending_audit_warnings[]` for Phase 4 to persist into `audit.json.warnings[]` (SKILL.md §"Warnings surface (P2.4)"). Do NOT regenerate the file — the audit channel surfaces the gap for human review; mechanical re-emission would churn a DS component whose role is already correct.
+
+### File location summary
+
+| Slot    | Path A (Server + Next file convention)     | Path B (Client or custom boundary)              |
+|---------|---------------------------------------------|--------------------------------------------------|
+| loaded  | `app/<route>/page.tsx`                     | `app/<route>/_loaded.tsx` (imported by page.tsx) |
+| loading | `app/<route>/loading.tsx`                  | `app/<route>/_loading.tsx`                       |
+| empty   | `app/<route>/_empty.tsx` (imported by page) | `app/<route>/_empty.tsx` (imported by loaded)   |
+| initial | `app/<route>/_initial.tsx` (imported by page) | `app/<route>/_initial.tsx` (imported by loaded) |
+| error   | `app/<route>/error.tsx` (`'use client'`)   | `app/<route>/_error.tsx`                        |
+
+### Component naming
+
+Per-variant components are named `<PageName><SlotPascal>`:
+- `DashboardPage` (loaded — existing convention)
+- `DashboardLoading`
+- `DashboardEmpty`
+- `DashboardInitial`
+- `DashboardError`
+
+For stepper-step variants (P1.1), add the step: `<GroupName>Step<N><SlotPascal>` (e.g. `OnboardingStep2Loading`).
+
+---
+
 ## Mobile variants (B-FLOW-MOBILE-VARIANT)
 
 When a page carries `mobile_variant` in `flow-graph.json`, Phase 4 verifies both viewports and Phase 3 emits **one** responsive component instead of two separate components. The mobile frame provides layout/spacing guidance — never its own JSX tree.
@@ -445,6 +660,25 @@ Both must pass the per-page threshold. A desktop-pass / mobile-fail pair stays f
 ### Report
 
 Phase 6 per-page table gains an extra column when any page has a `mobile_variant`: `Mobile %` next to `Pixel-diff %`. Desktop-only pages show `—`.
+
+### Mobile × state composition (P2.2)
+
+Mobile variants and state variants MUST compose without an N×M explosion of Figma frames. The contract: **one `mobile_variant` per host, reused across every non-stub state slot.**
+
+**Rules:**
+1. `mobile_variant` lives on the host (`page` or `stepper_step`), NOT on an individual state slot. The IR never carries `state_variants.loading.mobile_variant` and codegen MUST NOT invent one.
+2. Every non-stub state slot inherits the host's `mobile_variant` automatically — the same responsive rules from the `loaded` variant (media queries, utility classes, breakpoint tokens) carry over to `loading` / `empty` / `error` without a separate mobile frame per slot.
+3. A slot-specific mobile layout is expressed as a CSS-only adjustment inside the slot's component, keyed off the same breakpoint token. If the loading skeleton needs a different mobile stack than the loaded body, emit a media query in `<PageName>Loading.module.css` (or the Tailwind utility equivalent) — do NOT ask the user for a second mobile Figma frame.
+4. Stubs never render mobile-specific styling; the dashed placeholder is fixed-size by design.
+
+**What to do when a slot's Figma frame diverges from loaded at mobile:**
+- If the mobile divergence is purely spatial (stacked instead of side-by-side, collapsed action bar, hidden secondary copy), express it in the slot's stylesheet using the same breakpoint tokens the `loaded` variant uses. Copy the media-query structure from `<PageName>.module.css` / the utility string the loaded variant used, and apply it to the slot's root.
+- If the mobile divergence is structural (entirely different JSX tree at mobile — e.g. a card grid loading skeleton becomes a single full-width bar on mobile), STOP and stage an audit warning on `flow_graph._pending_audit_warnings[]` for Phase 4 to persist: `{ kind: "missing_mobile_counterpart", route: "<route>", slot: "<slot>", node_id: "<slot variant node_id>", recommendation: "Provide a mobile Figma frame for the <slot> slot or hand-edit the generated responsive styles to match designer intent. Inheriting loaded's mobile structure won't reflect the designed mobile behaviour here.", details: { mobile_strategy: "inherit-from-loaded" } }`. Generate the desktop skeleton and note the divergence — never synthesise a made-up mobile skeleton. See SKILL.md §"Warnings surface (P2.4)" for the canonical shape.
+
+**Verification (Phase 4):**
+Phase 4's mobile pixel-diff pass runs once per non-stub variant at the mobile viewport derived from the host's `mobile_variant.absoluteBoundingBox`. The Figma screenshot compared against is the **loaded** frame's mobile export — divergent slots won't match pixel-for-pixel and MUST rely on the tokens-aware CSS adjustments to pass. If the mobile pixel-diff consistently fails on a non-loaded slot, the audit warning from rule 4 is the expected outcome — human review replaces the generated styles with designer-approved mobile copy.
+
+**Identity guarantee:** a host WITHOUT `state_variants` (loaded-only) behaves exactly as today — one desktop + one mobile pixel-diff, no slot iteration. P0.8 identity gate holds.
 
 ---
 
@@ -872,6 +1106,65 @@ export default function StepEmail() {
   );
 }
 ```
+
+### Per-step state variants
+
+When `stepper_groups[i].steps[j].state_variants` is present, the step body gets Path-B-style boundary wiring — **never Path A**. Path A (Next.js `loading.tsx` / `error.tsx`) is per-route-segment and cannot target a specific step index inside a single-route stepper; the whole group lives at one URL. Cross-ref Path B details at [§Path B](#path-b--client-components-or-error_boundarykind--next-file-convention).
+
+Ordering rule: declare variants only when the step's non-loaded state is materially different from the loaded body. A step that already handles empty via a zero-length data branch inside `StepEmail.tsx` does not need a separate `_empty.tsx` — keep it as an inline branch (principle 5).
+
+File layout (extending the base stepper layout above):
+
+```
+app/onboarding/
+  page.tsx
+  _steps/
+    StepEmail.tsx                  # loaded body — unchanged
+    StepVerify.tsx
+    StepVerifyLoading.tsx          # only when steps[1].state_variants.loading is declared
+    StepVerifyError.tsx            # only when steps[1].state_variants.error is declared
+    StepVerifyEmpty.tsx            # prefer inline branch inside StepVerify.tsx; emit only
+                                   # when the empty frame is materially different
+    StepProfile.tsx
+```
+
+Naming: `<GroupName>Step<Title><SlotPascal>` where `<Title>` is the step's `title` field (same source that drives `_steps/Step<Title>.tsx` today). Examples: `OnboardingStepVerifyLoading`, `OnboardingStepVerifyError`.
+
+Composition inside `page.tsx` — wrap only the step indices that declare variants; leave others unwrapped so identity holds for steps without variants:
+
+```tsx
+// app/onboarding/page.tsx — excerpt, replaces the flat `stepContent` array above
+import { Suspense } from 'react';
+import { ErrorBoundary } from '<import_path>';     // from project_conventions.error_boundary.import_path
+import StepEmail from './_steps/StepEmail';
+import StepVerify from './_steps/StepVerify';
+import StepVerifyLoading from './_steps/StepVerifyLoading';
+import StepVerifyError from './_steps/StepVerifyError';
+import StepProfile from './_steps/StepProfile';
+
+// …inside OnboardingStepperBody, replacing the flat array:
+const stepContent = [
+  <StepEmail key="email" />,
+  // step 2 has state_variants — wrap in Path B composition
+  <ErrorBoundary key="verify" FallbackComponent={StepVerifyError}>
+    <Suspense fallback={<StepVerifyLoading />}>
+      <StepVerify />
+    </Suspense>
+  </ErrorBoundary>,
+  <StepProfile key="profile" />,
+][currentStep];
+```
+
+- Steps without `state_variants` render exactly as today — no `<Suspense>`, no `<ErrorBoundary>`. Loaded-only stepper flows stay byte-identical per the identity guarantee (principle 6).
+- The `ErrorBoundary` import specifier comes from `project_conventions.error_boundary.import_path`, same as route-level Path B.
+- The shared shell is untouched — only the swappable body wraps. Header/progress/footer keep rendering during the step's loading/error state.
+- A step's data-fetching call that can throw (e.g. `useSuspenseQuery`) lives inside `<StepVerify>`; `<Suspense>` catches the throw and renders `<StepVerifyLoading>` until the query resolves.
+- When `state_variants.error.stub === true` on a step, emit `<GroupName>Step<Title>ErrorPlaceholder` from the dashed-border template in [§Error stub](#error-stub-state_variantserrorstub--true) and import it as `FallbackComponent` exactly like the non-stub case.
+
+Accessibility during a per-step state transition:
+- `StepVerifyLoading` root keeps `aria-busy="true"` (same as route-level loading).
+- `StepVerifyError` root keeps `role="alert"` + `aria-live="assertive"`.
+- The outer `role="region"` wrapper on `[data-stepper-body]` stays — screen readers still anchor the step heading during a loading/error transition.
 
 ### Next/Back wiring via `pick-link-target.js`
 

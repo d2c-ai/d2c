@@ -743,7 +743,233 @@ function validateSemantic(graph) {
     });
   }
 
+  // State variants — per-page and per-stepper-step cross-field rules.
+  // Layer 1 (JSON Schema) enforces the structural shape (presence of `loaded`,
+  // mandatory `trigger` on loading/error, additionalProperties:false on each
+  // variant definition). Layer 2 fills gaps the inlined validator cannot
+  // express without oneOf:
+  //   - loaded.node_id / loaded.figma_url must mirror the host's primary
+  //     frame (can't be a different frame than the host declares).
+  //   - All slots on one host share the host's file_key (MVP bars cross-file
+  //     variants; P3.4 lifts this).
+  //   - error stub mutex: `stub: true` rejects node_id/figma_url, and a
+  //     non-stub error entry requires BOTH node_id and figma_url.
+  //   - state_variants are forbidden in auto_discovered (Form C) flows —
+  //     that combination is explicitly deferred to P3.1.
+  //   - project_conventions MUST be present when any host declares
+  //     state_variants (per-variant dispatch and Phase 3 codegen both read it).
+  const VARIANT_SLOTS = ["empty", "error", "initial", "loaded", "loading"];
+  let anyStateVariants = false;
+
+  function validateHostVariants(host, hostLabel) {
+    if (!host || !host.state_variants) return;
+    anyStateVariants = true;
+    const sv = host.state_variants;
+
+    // loaded slot mirrors host
+    if (sv.loaded) {
+      if (sv.loaded.node_id !== host.node_id) {
+        errors.push(
+          `${hostLabel}.state_variants.loaded.node_id — must equal host node_id "${host.node_id}" (got "${sv.loaded.node_id}")`
+        );
+      }
+      if (sv.loaded.figma_url !== host.figma_url) {
+        errors.push(
+          `${hostLabel}.state_variants.loaded.figma_url — must equal host figma_url (got "${sv.loaded.figma_url}")`
+        );
+      }
+    }
+
+    // cross-file rejection: every slot's file_key must match host.file_key
+    const hostFileKey = host.file_key ?? null;
+    for (const slot of VARIANT_SLOTS) {
+      const entry = sv[slot];
+      if (!entry) continue;
+      if (slot === "error" && entry.stub === true) continue; // stub has no file_key
+      const fk = entry.file_key ?? null;
+      if (fk !== null && hostFileKey !== null && fk !== hostFileKey) {
+        errors.push(
+          `${hostLabel}.state_variants.${slot}.file_key — MVP bars cross-file variants (host "${hostFileKey}", slot "${fk}")`
+        );
+      }
+    }
+
+    // error slot stub mutex
+    if (sv.error) {
+      const isStub = sv.error.stub === true;
+      const hasNode = typeof sv.error.node_id === "string" && sv.error.node_id.length > 0;
+      const hasUrl = typeof sv.error.figma_url === "string" && sv.error.figma_url.length > 0;
+      if (isStub) {
+        if (hasNode) {
+          errors.push(
+            `${hostLabel}.state_variants.error — stub entries must not carry node_id`
+          );
+        }
+        if (hasUrl) {
+          errors.push(
+            `${hostLabel}.state_variants.error — stub entries must not carry figma_url`
+          );
+        }
+      } else {
+        if (!hasNode) {
+          errors.push(
+            `${hostLabel}.state_variants.error.node_id — required when stub is not true`
+          );
+        }
+        if (!hasUrl) {
+          errors.push(
+            `${hostLabel}.state_variants.error.figma_url — required when stub is not true`
+          );
+        }
+      }
+    }
+
+    // Distinctness: loading / empty / non-stub error node_ids must differ from
+    // loaded (host) and from each other — same frame in two slots is a prompt
+    // extraction bug.
+    const slotNodes = {};
+    for (const slot of VARIANT_SLOTS) {
+      const entry = sv[slot];
+      if (!entry) continue;
+      if (slot === "error" && entry.stub === true) continue;
+      if (!entry.node_id) continue;
+      slotNodes[slot] = entry.node_id;
+    }
+    const seenIds = new Map();
+    for (const [slot, id] of Object.entries(slotNodes)) {
+      if (slot === "loaded") continue; // loaded MUST equal host — already checked above
+      if (id === slotNodes.loaded) {
+        errors.push(
+          `${hostLabel}.state_variants.${slot}.node_id — must differ from loaded frame (got the same node_id "${id}")`
+        );
+      }
+      if (seenIds.has(id)) {
+        errors.push(
+          `${hostLabel}.state_variants.${slot}.node_id — duplicates ${seenIds.get(id)} slot (both reference "${id}")`
+        );
+      }
+      seenIds.set(id, slot);
+    }
+  }
+
+  pages.forEach((p, i) => {
+    validateHostVariants(p, `pages[${i}]`);
+  });
+  (graph.stepper_groups || []).forEach((g, gi) => {
+    (g.steps || []).forEach((s, si) => {
+      validateHostVariants(s, `stepper_groups[${gi}].steps[${si}]`);
+    });
+  });
+
+  if (anyStateVariants) {
+    if (graph.auto_discovered === true) {
+      errors.push(
+        "state_variants — not supported for auto_discovered (Form C) flows in MVP (deferred to P3.1)"
+      );
+    }
+    if (!graph.project_conventions) {
+      errors.push(
+        "project_conventions — required when any host declares state_variants (populated by detect-project-conventions.js in Phase 2a)"
+      );
+    }
+  } else if (graph.project_conventions) {
+    // Identity guarantee (P0.8): loaded-only flows must not carry a
+    // project_conventions block. The convention detector is gated on the
+    // presence of state_variants — a stray block here means Phase 2a drifted
+    // and the IR is no longer byte-identical to the pre-state-variants shape.
+    errors.push(
+      "project_conventions — only allowed when at least one host declares state_variants (loaded-only flows must omit this field)"
+    );
+  }
+
+  // ---------- P2.3: deterministic slot ordering ----------
+  //
+  // state_variants object keys MUST be in canonical order (empty, error,
+  // initial, loaded, loading) regardless of prompt input order, so a reordered
+  // prompt produces byte-identical IR. Phase 2a is expected to call
+  // normalizeFlowGraph(graph) before writing to disk; an out-of-order IR
+  // means that step was skipped.
+  function checkSlotOrder(host, hostLabel) {
+    if (!host || !host.state_variants) return;
+    const keys = Object.keys(host.state_variants);
+    const expected = VARIANT_SLOTS.filter((s) => keys.includes(s));
+    const actual = keys.filter((k) => VARIANT_SLOTS.includes(k));
+    if (
+      actual.length !== expected.length ||
+      actual.some((k, i) => k !== expected[i])
+    ) {
+      errors.push(
+        `${hostLabel}.state_variants — slot keys must appear in canonical order [${expected.join(
+          ", "
+        )}] (got [${actual.join(", ")}]). Call normalizeFlowGraph(graph) before serialising.`
+      );
+    }
+  }
+  pages.forEach((p, i) => checkSlotOrder(p, `pages[${i}]`));
+  (graph.stepper_groups || []).forEach((g, gi) => {
+    (g.steps || []).forEach((s, si) =>
+      checkSlotOrder(s, `stepper_groups[${gi}].steps[${si}]`)
+    );
+  });
+
   return errors;
+}
+
+// ---------- P2.3: normalisation ----------
+
+/**
+ * Return a shallow copy of the flow graph with state_variants slot keys
+ * re-ordered to the canonical sequence (empty, error, initial, loaded, loading).
+ *
+ * Pure — does not mutate the input. Phase 2a MUST call this before writing
+ * flow-graph.json so that reordered prompt input produces byte-identical IR.
+ *
+ * Only state_variants objects are normalised. Pages, edges, and stepper steps
+ * keep their existing structural order (which is semantically meaningful:
+ * pages carry a step_number; edges chain pairs of pages). Everything else
+ * passes through unchanged.
+ */
+const CANONICAL_SLOT_ORDER = ["empty", "error", "initial", "loaded", "loading"];
+
+function normalizeStateVariants(sv) {
+  if (!sv || typeof sv !== "object") return sv;
+  const out = {};
+  for (const slot of CANONICAL_SLOT_ORDER) {
+    if (slot in sv) out[slot] = sv[slot];
+  }
+  // Preserve any unknown keys at the end so future extensions survive a
+  // normalisation round-trip without data loss (the JSON Schema rejects them
+  // anyway, but the normaliser shouldn't be destructive).
+  for (const key of Object.keys(sv)) {
+    if (!CANONICAL_SLOT_ORDER.includes(key)) out[key] = sv[key];
+  }
+  return out;
+}
+
+function normalizeFlowGraph(graph) {
+  if (!graph || typeof graph !== "object") return graph;
+  const copy = { ...graph };
+  if (Array.isArray(copy.pages)) {
+    copy.pages = copy.pages.map((p) =>
+      p && p.state_variants
+        ? { ...p, state_variants: normalizeStateVariants(p.state_variants) }
+        : p
+    );
+  }
+  if (Array.isArray(copy.stepper_groups)) {
+    copy.stepper_groups = copy.stepper_groups.map((g) => {
+      if (!g || !Array.isArray(g.steps)) return g;
+      return {
+        ...g,
+        steps: g.steps.map((s) =>
+          s && s.state_variants
+            ? { ...s, state_variants: normalizeStateVariants(s.state_variants) }
+            : s
+        ),
+      };
+    });
+  }
+  return copy;
 }
 
 // ---------- Manifest verification ----------
@@ -847,6 +1073,15 @@ function parseArgs(argv) {
       opts.verifyManifest = argv[++i];
     } else if (a === "--tokens") {
       opts.tokens = argv[++i];
+    } else if (a === "--normalize") {
+      // --normalize writes the normalised graph back to the same file (or to
+      // the next arg if it's a path). Phase 2a calls this before validation
+      // to make state_variants slot order canonical.
+      opts.normalize = true;
+      const next = argv[i + 1];
+      if (next && !next.startsWith("--")) {
+        opts.normalizeOut = argv[++i];
+      }
     } else {
       positional.push(a);
     }
@@ -858,7 +1093,7 @@ function main() {
   const { positional, opts } = parseArgs(process.argv.slice(2));
   if (positional.length !== 1) {
     console.error(
-      "usage: validate-flow-graph.js <flow-graph-path> [--verify-manifest <manifest-path> --tokens <tokens-path>]"
+      "usage: validate-flow-graph.js <flow-graph-path> [--verify-manifest <manifest-path> --tokens <tokens-path>] [--normalize [<out-path>]]"
     );
     process.exit(2);
   }
@@ -888,6 +1123,17 @@ function main() {
     console.log("errors: 1");
     console.log(`error: flow-graph.json — could not read ${graphPath}: ${e.message}`);
     process.exit(1);
+  }
+
+  if (opts.normalize) {
+    const normalised = normalizeFlowGraph(graph);
+    const outPath = opts.normalizeOut || graphPath;
+    fs.writeFileSync(outPath, JSON.stringify(normalised, null, 2));
+    console.log("normalize: ok");
+    console.log(`wrote: ${outPath}`);
+    // Fall through to run the full validation against the normalised graph so
+    // the caller sees both the normalise result AND validation outcome.
+    graph = normalised;
   }
 
   const structural = validateSchema(schema, graph, "", schema);
@@ -930,4 +1176,7 @@ module.exports = {
   validateSemantic,
   verifyManifest,
   computeTokensHash,
+  normalizeFlowGraph,
+  normalizeStateVariants,
+  CANONICAL_SLOT_ORDER,
 };
