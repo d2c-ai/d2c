@@ -138,6 +138,10 @@
     "project_conventions": {
       "$ref": "#/definitions/project_conventions",
       "description": "Detected project conventions used when the flow emits per-variant composition (Phase 2a project-convention detector). Absent when no page declares state_variants — loaded-only flows do not need convention data. When present, consumed by per-variant dispatch into /d2c-build and by Phase 3 codegen to decide between Next.js file-convention layout (loading.tsx/error.tsx) and inline Suspense+ErrorBoundary composition."
+    },
+    "flow_intake": {
+      "$ref": "#/definitions/flow_intake",
+      "description": "Answers to the flow-level intake questions asked once in Phase 1.5. Bundled here so every per-page/per-step /d2c-build dispatch can read the user's actual choices instead of falling back to the structured-input defaults at /d2c-build §1.0. Absent only when the user passed --yes (in which case standalone /d2c-build defaults apply)."
     }
   },
   "additionalProperties": false,
@@ -548,6 +552,86 @@
         "state_variants": {
           "$ref": "#/definitions/state_variants",
           "description": "Per-step UI state variants (loaded / loading / empty / error / initial) inside a stepper group. Same shape as pages[].state_variants. Omitted when only the loaded frame was declared. When present, `loaded.node_id` matches this step's node_id and figma_url."
+        },
+        "mobile_variant": {
+          "type": ["object", "null"],
+          "description": "Mobile viewport pair for this stepper step (B-FLOW-MOBILE-VARIANT). Same shape as pages[].mobile_variant. Populated by Phase 1.5 when the user answered 'yes' to the mobile question and supplied a mobile URL for this step's index.",
+          "required": ["figma_url", "node_id"],
+          "properties": {
+            "figma_url": { "type": "string", "format": "uri" },
+            "node_id": { "type": "string" },
+            "file_key": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "flow_intake": {
+      "type": "object",
+      "required": ["what", "mode", "viewports", "components_to_reuse", "has_api_calls", "mobile"],
+      "description": "Flow-level intake answers gathered once in Phase 1.5 and propagated to every per-page/per-step /d2c-build dispatch via the structured-input payload. Replaces the hardcoded defaults at /d2c-build §1.0.",
+      "properties": {
+        "what": {
+          "type": "string",
+          "enum": ["page", "section", "component"],
+          "description": "Standard /d2c-build Q1. Defaults to 'page' for flows; the flow's Phase 1.5 prompt only asks when the user explicitly mixes section-level frames."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["functional", "visual-only"],
+          "description": "Standard /d2c-build Q3. Always asked at flow level — drives shared_state inference, form-validation generation, and API plumbing."
+        },
+        "viewports": {
+          "type": "string",
+          "enum": ["desktop-only", "multiple"],
+          "description": "Standard /d2c-build Q4. Skipped on Simple-classified flows (defaults to 'desktop-only'). When 'multiple', the mobile question (Q7) collects per-step mobile URLs upfront."
+        },
+        "components_to_reuse": {
+          "type": "string",
+          "description": "Standard /d2c-build Q5. Free-text user answer; 'use what makes sense' is the most common response."
+        },
+        "has_api_calls": {
+          "type": "string",
+          "enum": ["yes", "no"],
+          "description": "Standard /d2c-build Q6. Skipped on Simple-classified flows (defaults to 'no')."
+        },
+        "api_calls": {
+          "type": "array",
+          "description": "When has_api_calls === 'yes', the user's described API calls. Each entry mirrors the standalone /d2c-build follow-up format.",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string", "description": "User's name/description for the API call (e.g. 'fetch user profile')." },
+              "schema": { "type": ["string", "null"], "description": "Optional sample response JSON or endpoint schema as a free-text blob." }
+            },
+            "additionalProperties": false
+          }
+        },
+        "mobile": {
+          "type": "object",
+          "required": ["enabled", "urls_by_step_index"],
+          "description": "Result of the new flow-level mobile question (Q7). When enabled, urls_by_step_index maps each declared step's index (0-based, in declaration order across pages[] + stepper_groups[*].steps[*]) to its mobile Figma URL. Phase 2a then attaches each URL to the matching host's mobile_variant.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "urls_by_step_index": {
+              "type": "object",
+              "description": "Sparse map; keys are stringified 0-based step indices. Empty object when enabled === false.",
+              "additionalProperties": { "type": "string", "format": "uri" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "complexity": {
+          "type": "string",
+          "enum": ["simple", "medium", "complex"],
+          "description": "Dominant flow-level complexity from Phase 1.5a classification. Persisted so reruns can echo the same skip rationale."
+        },
+        "skipped_questions": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["viewports", "has_api_calls", "mobile"] },
+          "description": "Questions skipped by the complexity classifier. Surfaced in the flow-level intake echo so the user knows what defaults were applied."
         }
       },
       "additionalProperties": false

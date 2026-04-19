@@ -180,7 +180,15 @@ Payload schema (validated by `skills/d2c-build/scripts/parse-structured-input.js
 }
 ```
 
-Required: `figma_url`, `component_name`, `output_path`, `semantic_role`, `project_conventions`. Everything else is optional and carries sensible defaults (`what: "component"`, `mode: "functional"`, `viewports: "desktop-only"`, `components_to_reuse: "use what makes sense"`, `has_api_calls: "no"`, `trigger: null`, `audit_path: null`). `audit_path`, when provided, must end in `audit.json` — Phase 6 appends the variant's pixel-diff result entry to that file (flow-level audit aggregation; see §Phase 6).
+Required: `figma_url`, `component_name`, `output_path`, `semantic_role`, `project_conventions`. Everything else is optional and carries sensible defaults (`what: "component"`, `mode: "functional"`, `viewports: "desktop-only"`, `components_to_reuse: "use what makes sense"`, `has_api_calls: "no"`, `trigger: null`, `audit_path: null`, `api_calls: []`, `stepper_step: null`). `audit_path`, when provided, must end in `audit.json` — Phase 6 appends the variant's pixel-diff result entry to that file (flow-level audit aggregation; see §Phase 6). `api_calls`, when provided, mirrors standalone Q6's follow-up — `[{name: "...", schema?: "..."}]` — and is populated by `/d2c-build-flow` Phase 1.5 when the user answered Q6 with `yes` at the flow level. The validator rejects a non-empty `api_calls` paired with `has_api_calls: "no"`.
+
+`stepper_step`, when provided, switches Phase 3 codegen into **stepper-step mode**: the emitted file is a presentational React component (no `'use client'` of its own, no `router.push` imports, no provider imports) with the standard step prop contract `{ onNext, onBack, onValidityChange?, optional?, data?, setField? }`. Required keys on the object: `step_index` (1-based int), `total_steps` (int ≥ 1), `validation_required` (bool), `optional` (bool). Optional keys: `next_button_node_id`, `back_button_node_id`, `state_writes[]` (mirrors the stepper step's IR `state_writes`). Wiring rules:
+- The component identified by `next_button_node_id` (or, when null, the highest-ranked Next-text component per the same heuristic as `pick-link-target.js`) gets `onClick={onNext}`. Same logic applied with `back_button_node_id` for `onClick={onBack}`.
+- Form fields whose name matches a `state_writes[i].name` are wired to `data?.<name>` and `setField?.(name, value)`.
+- When `validation_required === true`, the form's overall validity is reported via `onValidityChange?.(valid)` on every field change. The orchestrator wires this to the stepper provider's `markStepValid(currentStep, valid)`.
+- The validator enforces `semantic_role: "loaded"` and `what: "component"` when `stepper_step` is set — stepper Next/Back wiring only makes sense for the loaded slot of a step rendered as a sub-component.
+
+`stepper_step` is dispatched by `/d2c-build-flow` Phase 3 when delegating each step body of a `page_type === "stepper_group"` virtual page (see `/d2c-build-flow/SKILL.md` §Phase 3 step 3). Standalone `/d2c-build` invocations should leave it `null` — the standard route-page codegen path is wrong for a stepper step body.
 
 Invocation helper:
 ```bash
@@ -732,6 +740,52 @@ Follow the Non-negotiables (rules 1–6 at the top of this file) and the Generat
    - **RIGHT:** Only the parent has `"use client"`. MetricCard has no directive — it is automatically client-rendered because its parent is a client component.
 7. Focus on the default/resting visual state. Add subtle transitions on interactive elements by default: `transition-colors duration-150` (or equivalent) on buttons, links, and clickable cards. Add `hover:opacity-80` or a framework-appropriate hover state for buttons. Do NOT implement complex animations, active states, or loading animations unless the user explicitly requests them or the Figma design includes them as separate frames.
 8. **Tailwind class selection rule (if Tailwind):** MUST use the shortest Tailwind class that achieves the exact value. MUST use scale classes (`p-4`) when the value is in the scale — NEVER substitute arbitrary values (`p-[16px]`) when a scale class exists. Use arbitrary values ONLY when no scale class matches. NEVER use longhand (`px-4 py-4`) when shorthand (`p-4`) achieves the same result. For colors, MUST use the semantic token class (`bg-primary`) over the raw color class (`bg-blue-500`) when a semantic token exists. **Use the framework's class attribute name** — `className` for React/Solid (JSX), `class` for Vue/Svelte/Angular/Astro/Qwik. Check the framework reference file.
+
+### Stepper step mode (when `stepper_step` is set on the structured-input payload)
+
+When the Phase 1.0 payload carries a non-null `stepper_step` block, switch the Phase 3 emission mode for **this dispatch only**. Standalone `/d2c-build` invocations never set this — it's exclusively populated by `/d2c-build-flow` Phase 3 when delegating each step body of a `page_type === "stepper_group"` virtual page.
+
+The non-negotiables (rules 1–6) all still apply — the entire point of routing stepper bodies through `/d2c-build` is to enforce them. Reuse, tokens, conventions, library selection, locked decisions, and design-tokens drift work exactly as for a route page. Only the wiring of Next / Back / form-state changes.
+
+**What changes for emission:**
+
+1. **Output shape: presentational sub-component, not a route page.** Do NOT emit `'use client'` (the orchestrator owns it). Do NOT emit `router.push` for any button. Do NOT import a stepper provider hook (`useOnboarding`, etc.) — the orchestrator passes everything through props.
+
+2. **Standard step prop contract** — emit the component with exactly this prop shape (TypeScript shown; transliterate per framework reference for Vue / Svelte / Angular / Solid / Astro):
+   ```ts
+   export type <ComponentName>Props = {
+     onNext: () => void;
+     onBack: () => void;
+     onValidityChange?: (valid: boolean) => void;
+     optional?: boolean;
+     data?: Record<string, unknown>;        // shape inferred from stepper_step.state_writes
+     setField?: (key: string, value: unknown) => void;
+   };
+   ```
+   When `stepper_step.state_writes` is non-empty, narrow `data` and `setField` to the typed shape (e.g. `data?: { email?: string; name?: string }`, `setField?: <K extends 'email' | 'name'>(key: K, value: <typed>) => void`). When empty, the loose shape above is sufficient.
+
+3. **Next / Back wiring.**
+   - The component identified by `stepper_step.next_button_node_id` (or, when null, the highest-ranked Next-text component per the same heuristic as `pick-link-target.js` — match `/next|continue|submit|finish|done|confirm/i` on the component's Figma name) gets `onClick={onNext}`. Drop any `router.push` / `<Link>` wrapping the design might suggest.
+   - Same logic with `back_button_node_id` and `/back|previous|prev|return/i` for `onClick={onBack}`. Suppress the Back button entirely when `stepper_step.step_index === 1` (the first step has nothing to go back to) — render it `disabled` if the design draws it, never hide it (P0.8 identity: pixel diff still expects the visual).
+   - When `stepper_step.optional === true` and the design includes a Skip button, wire its `onClick` to `onNext` (skip = advance without validation).
+
+4. **Form field wiring.**
+   - For every form field whose label or `name` attribute matches a `stepper_step.state_writes[i].name` (case-insensitive, kebab/camel/snake-case tolerant), wire `value={data?.<name> ?? ''}` and `onChange={(e) => setField?.('<name>', e.target.value)}`.
+   - Field types narrow per `state_writes[i].type` — `boolean` → `checked`/`onChange`, `number` → `valueAsNumber`/`onChange` with parseFloat, `string` → standard `value`/`onChange`.
+   - Fields without a matching `state_writes` entry stay as uncontrolled or local state, same as today's standalone route emission.
+
+5. **Validation reporting.** When `stepper_step.validation_required === true`, emit a `useEffect` (or framework equivalent) that recomputes the form's overall validity on every field change and calls `onValidityChange?.(valid)`. The orchestrator uses this to gate its Next button. Validity rules: every wired field has a non-empty value; type-narrow fields meet their parser (number → not NaN; etc.); plus any per-field `pattern` declared in the Figma design's input metadata. When `validation_required === false`, omit the effect entirely.
+
+6. **No `<main>` semantic wrapper.** The orchestrator owns `<main>` (the stepper page is the `<main>`). The step body's outermost element is `<section>` or `<div>` — whichever the design draws — never `<main>`. This is the one accessibility carve-out for stepper-step mode; everything else in §"Generation Rules" rule 4 still applies.
+
+7. **Output path.** Honour the payload's `output_path` literally — it's set by the flow to `app/<group_route>/steps/Step<N>.tsx` (or framework equivalent). Do NOT relocate based on `File placement rules` in §"File Structure" — the flow already decided where the step lives and the orchestrator imports it from that exact path.
+
+8. **Phase 4 pixel-diff.** Standalone `/d2c-build` Phase 4 normally `page.goto(URL)` and screenshots. For stepper-step mode the URL is the orchestrator's URL and the page initially shows step 1, not the dispatched step. **Phase 4 in stepper-step mode is owned by `/d2c-build-flow` Phase 4 — the unified flow-walker test (see `/d2c-build-flow/SKILL.md` §Phase 4).** `/d2c-build` skips its own Phase 4 entirely when `stepper_step` is non-null and `audit_path` is set (the flow signals it will pixel-diff this step itself). Phase 5 audit and Phase 6 report append still run.
+
+**Failure modes specific to stepper-step mode:**
+
+- **P3-STEPPER-NEXT-MISSING** *(stop-and-ask)* — `next_button_node_id` is null AND no component in the design's Figma metadata matches the Next-text heuristic. Cannot wire `onNext`. Surface the design's component list and ask the user to identify the Next button (or confirm it's intentionally absent — in which case the orchestrator's footer Next is the only advance affordance).
+- **P3-STEPPER-FIELD-NAME-MISMATCH** *(inform)* — a `state_writes[i].name` did not match any field in the design. Emit the field as uncontrolled and warn in the Phase 5 audit so the user knows the state slice is unwired.
 
 ### API Integration Rules
 

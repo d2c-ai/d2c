@@ -217,6 +217,85 @@ Rules:
 
 ---
 
+## Phase 1.5 — Flow-level Intake
+
+Goal: ask the standard `/d2c-build` intake questions ONCE upfront and bundle the answers into `flow_intake` so every per-page/per-step `/d2c-build` dispatch can read them. This closes the gap where running `/d2c-build` standalone asks 6 questions but `/d2c-build-flow` silently fell back to the structured-input defaults at `/d2c-build/SKILL.md` §1.0. Also adds a flow-only Q7 that collects all mobile Figma URLs upfront in one pass.
+
+Runs after the Phase 1 confirm-or-edit gate, before Phase 1b. Skipped entirely when `--yes` is present in `$ARGUMENTS` (in which case the standard `/d2c-build` defaults apply per-dispatch and `flow_intake` is omitted from `flow-graph.json`).
+
+### 1.5a — Flow Complexity Classification
+
+For each declared step (every entry in the parsed step list, including stepper-group steps), call `mcp__Figma__get_metadata` to fetch the node tree only — no images, no full design context. Count descendant layers per step using the same rules as standalone `/d2c-build` §1.2a (FRAME, INSTANCE, COMPONENT, COMPONENT_SET, TEXT, RECTANGLE, ELLIPSE, LINE, VECTOR, GROUP, BOOLEAN_OPERATION, STAR, REGULAR_POLYGON, excluding the root).
+
+Resolve the dominant flow complexity:
+
+- **Simple flow** — every step is Simple-classified (Figma node name matches a Simple keyword AND ≤20 layers). Rare for flows; usually a misuse (a flow of icons or chips). Skip Q4 (viewports) + Q6 (API) + Q7 (mobile).
+- **Medium flow** — highest step is Medium (Medium keyword + ≤50 layers) and no step is Complex. AND the flow has fewer than 4 pages AND no `shared_state[]` declaration AND no `validate: form` on any stepper step. Skip Q6 only.
+- **Complex flow** — any step is Complex, OR the flow has 4+ pages, OR `shared_state[]` was declared, OR any stepper step carries `validate: form`. Ask all questions.
+
+Surface to the user before asking:
+
+> "Classified as **Complex flow** (5 pages, max 78 layers). Asking all questions including mobile."
+>
+> or
+>
+> "Classified as **Medium flow** (2 pages, max 35 layers). Skipping API question — defaulting to no API."
+
+Persist the classification on `flow_intake.complexity` and the list of skipped questions on `flow_intake.skipped_questions[]` so reruns can echo the same rationale.
+
+### 1.5b — Ask Intake Questions
+
+Ask the applicable questions in a single message, applying the skip rules from §1.5a. The questions mirror standalone `/d2c-build` §1.2b with the following flow-level deltas:
+
+1. **What is this?** *(skipped by default for flows — defaults to `page` since every step is route-bound)* — Only ask when the user's prompt explicitly mixes section-level frames into the flow (e.g. a step labelled "the header section of /dashboard"). Default = `page`.
+2. **Where should it live?** — **Skip.** Routes are already declared in the prompt and resolved by Phase 2a.
+3. **Functional or visual-only?** — Always ask. Drives shared_state inference, form-validation generation in stepper Next handlers, and API plumbing across pages.
+4. **Viewports?** *(skipped on Simple flows — defaults to `desktop-only`)* — `desktop-only` or `multiple`. Note: do **NOT** ask the user for per-step Figma URLs here — Q7 below collects them in one pass.
+5. **Components to reuse?** — Always ask. Free-text answer; "use what makes sense" is the most common response.
+6. **Does this design connect to any APIs?** *(skipped on Simple flows — defaults to `no`)* — Same follow-up structure as standalone `/d2c-build` Q6 (number of calls, then per-call name + sample schema). Stored in `flow_intake.api_calls[]`.
+7. **Mobile designs?** *(NEW — skipped on Simple flows)* — "Do you have mobile Figma designs for this flow? (yes / no)". If `yes`: prompt the user to paste one mobile Figma URL **per declared step in order** as a numbered list:
+   > "Paste the mobile Figma URL for each step, one per line, in declared order:
+   > 1. /onboarding/step-1: <mobile-url>
+   > 2. /onboarding/step-2: <mobile-url>
+   > 3. /onboarding/step-3: <mobile-url>"
+   
+   The user may write `skip` on any line — that step ships desktop-only. Validate every supplied URL carries a `?node-id=` segment (else fire **F-FLOW-FILE-URL** with the offending URL quoted). Validate each URL points to a real Figma frame (the same `mcp__Figma__get_metadata` check used on desktop URLs); a 404 fires **F-FLOW-MOBILE-FRAME-MISSING** with the step number quoted.
+
+Wait for answers before proceeding. Do not assume defaults beyond the auto-fills declared by the complexity classifier.
+
+### 1.5c — Bundle Answers into `flow_intake`
+
+Write the gathered answers to `flow_intake` on the in-memory run state, then persist on `flow-graph.json` (Phase 2a). Schema at `skills/d2c-build-flow/schemas/flow-graph.schema.json#/definitions/flow_intake`. Required fields:
+
+- `what`, `mode`, `viewports`, `components_to_reuse`, `has_api_calls`, `mobile`, `complexity`, `skipped_questions`.
+- `api_calls[]` only when `has_api_calls === "yes"`.
+- `mobile.urls_by_step_index` is a sparse object keyed by 0-based step index across pages[] + stepper_groups[*].steps[*] in declared order. Empty object when `mobile.enabled === false` or every step was `skip`-ed.
+
+### 1.5d — Propagate to Per-Page `/d2c-build` Dispatches
+
+Every Phase 2 (per-page IR + per-variant), Phase 3 (per-step body codegen — see §"Stepper groups" delegation in Phase 3), and Phase 4 (per-variant pixel-diff) dispatch into `/d2c-build` MUST include the `flow_intake` answers in the structured-input payload, replacing the hardcoded defaults at `/d2c-build/SKILL.md` §1.0. Mapping:
+
+| `flow_intake` field | structured-input payload field |
+|---|---|
+| `what` | `what` |
+| `mode` | `mode` |
+| `viewports` | `viewports` |
+| `components_to_reuse` | `components_to_reuse` |
+| `has_api_calls` | `has_api_calls` |
+| `api_calls[]` | passed through as a top-level `api_calls` array (parser already accepts it) |
+
+The mobile URLs are NOT propagated as payload fields — instead, Phase 2a attaches `mobile_variant: { figma_url, node_id, file_key }` directly to each matching page / stepper_step IR (the existing `mobile_variant` field). The flow's existing `mobile_variant` codegen path (`framework-react-next.md` §"Mobile variants") then handles dual-viewport pixel-diff and responsive emission without any further payload plumbing.
+
+When `--yes` is present and `flow_intake` is omitted, every dispatch falls back to the existing structured-input defaults — preserving today's silent behaviour for scripted invocations.
+
+### Failure modes
+
+- **F-FLOW-INTAKE-METADATA-FAILED** *(stop-and-ask)* — `mcp__Figma__get_metadata` failed for one or more steps during §1.5a. Show the failing step numbers and ask whether to (a) retry, (b) skip classification and treat the flow as Complex (ask all questions), or (c) abort.
+- **F-FLOW-MOBILE-FRAME-MISSING** *(stop-and-ask)* — a mobile URL supplied in §1.5b Q7 returned 404 from `mcp__Figma__get_metadata`. Show the step number and URL; ask the user to re-supply or `skip` that step.
+- **F-FLOW-MOBILE-COUNT-MISMATCH** *(stop-and-ask)* — the user pasted a different number of mobile URLs than declared steps (excluding `skip` lines). Show both counts and the parsed list; ask the user to re-supply.
+
+---
+
 ## Phase 1b — State variant extraction
 
 Goal: from the raw prompt text, recognise `(figma_url, state_keyword, trigger, step_ref)` quadruples so Phase 2a can attach `state_variants` blocks to the correct pages / stepper steps. This phase is **prose-based, not grammar-based** — the skill does not extend the Phase 1 parser. Instead it instructs the executing model to read the prompt and produce a deterministic extraction table.
@@ -517,6 +596,16 @@ Create `.claude/d2c/runs/<YYYY-MM-DDTHHMMSS>/flow/` containing `flow-graph.json`
    - `n` → stop cleanly with "aborted at variant-confirm gate".
    - `--yes` short-circuits to `y` but still prints the table for audit.
 
+6d. **Attach mobile variants from Phase 1.5.** When `flow_intake.mobile.enabled === true`, walk the `flow_intake.mobile.urls_by_step_index` map and attach each entry to the matching host's `mobile_variant`:
+
+   - The 0-based step index keys this map. Resolve the index to a host by walking the declared step order: every entry in `pages[]` (filtered to `page_type === "page"`) followed by every step in each `stepper_groups[*].steps[]` in declared order. Index 0 is the first declared step, regardless of whether it's a route page or a stepper step.
+   - For each `(index, mobile_url)` pair, parse `node_id` and `file_key` from the URL (same extraction as step 2's URL parsing). Construct `mobile_variant: { figma_url: mobile_url, node_id, file_key }`.
+   - Write the block onto the matching host (`pages[i].mobile_variant` for route pages and overlays; `stepper_groups[g].steps[s].mobile_variant` for stepper steps). The schema accepts `mobile_variant` on both shapes.
+   - **Skip indices** are absent from the map (the user wrote `skip` on that line in §1.5b Q7). Hosts at those indices ship desktop-only — no `mobile_variant` written.
+   - When `flow_intake` is absent (`--yes` was passed) OR `flow_intake.mobile.enabled === false`, this step is a no-op. Pre-existing per-step `mobile:` directives from Phase 1 (the inline opt-in form, see §"Optional `mobile:` directive") still apply — Phase 1.5 only fills in mobile variants the user did NOT supply inline. A collision between a Phase 1 inline `mobile:` URL and a Phase 1.5 URL for the same step fires **F-FLOW-MOBILE-DOUBLE-SOURCE** (stop-and-ask, surface both URLs).
+
+   The downstream `mobile_variant` codegen path (`framework-react-next.md` §"Mobile variants") and Phase 4 dual-viewport pixel-diff are unchanged — they read `mobile_variant` regardless of whether the URL came from a Phase 1 inline directive or Phase 1.5 bulk collection.
+
 7. **Emit + validate.** Write `flow-graph.json` and run:
    ```bash
    node skills/d2c-build-flow/scripts/validate-flow-graph.js <run-dir>/flow/flow-graph.json
@@ -530,7 +619,26 @@ Create `.claude/d2c/runs/<YYYY-MM-DDTHHMMSS>/flow/` containing `flow-graph.json`
    - `started_at` — ISO 8601 timestamp with timezone
    - `framework`, `meta_framework` — inherited from design-tokens.json
 
-9. **Freeze.** After successful validation, treat `flow-graph.json` as immutable for all subsequent phases. Any need to change it during Phase 3+ requires STOP AND ASK per flow-rule #8.
+9. **Freeze + emit `flow-decisions-lock.json`.** After successful validation, treat `flow-graph.json` as immutable for all subsequent phases. Any need to change it during Phase 3+ requires STOP AND ASK per flow-rule #8.
+
+   Immediately after `flow-graph.json` validates, emit a per-decision lock file alongside it so Phase 3 / 4 / 5 retries CANNOT silently re-decide a flow-level choice (mode, shell, project_conventions, stepper_groups, per-page route / layout / mobile_variant, per-edge source_component / trigger / condition). Schema at `skills/d2c-build-flow/schemas/flow-decisions-lock.schema.json`; emitter at `skills/d2c-build-flow/scripts/write-flow-lock.js`. Run:
+
+   ```bash
+   node skills/d2c-build-flow/scripts/write-flow-lock.js <run-dir>/flow/flow-graph.json
+   ```
+
+   The writer is deterministic (same input + same `--locked-at` produces a byte-identical lock) and uses atomic file ops (write to `<path>.tmp.<pid>.<ts>`, then rename). Default output path is the sibling `<run-dir>/flow/flow-decisions-lock.json`.
+
+   **Lock entry lifecycle** (mirrors `skills/d2c-build/schemas/decisions-lock.schema.json`): every locked decision starts with `status: "locked"`. Phase 3 / 4 / 5 read the lock before any edit; a mismatch between a `status: "locked"` value and the current `flow-graph.json` value fires **F-FLOW-LOCK-CONFLICT** (stop-and-ask). The user can either revert the IR or mark the entry `status: "failed"` (which permits re-decision and records `failed_by: "phase3_codegen" | "phase4_walker" | "phase4b_navsmoke" | "phase5_audit" | "user_override"`). On the next Phase 2a re-emit, failed entries are re-locked with their new value.
+
+   **Verification.** Phase 3 / 4 / 5 verify the lock against the current IR before proceeding:
+
+   ```bash
+   node skills/d2c-build-flow/scripts/validate-flow-graph.js <run-dir>/flow/flow-graph.json \
+     --verify-lock <run-dir>/flow/flow-decisions-lock.json
+   ```
+
+   The validator emits `lock: ok` or `lock: fail` plus one `error: flow-decisions-lock — F-FLOW-LOCK-CONFLICT — <decision_path> — locked=<value> current=<value>` line per mismatch. A missing or stale lock (hash drift) fires **F-FLOW-LOCK-MISSING** (auto-recover; regenerate the lock and retry once).
 
 ---
 
@@ -547,7 +655,7 @@ For each page in `flow-graph.pages[]` (in order):
    - Set the per-variant run directory to `.claude/d2c/runs/<ts>/pages/<node_id>/variants/<slot>/`.
    - Derive the `component_name` as `<PageName><SlotPascal>` (e.g. `DashboardLoading`, `DashboardEmpty`, `DashboardError`).
    - Derive the `output_path` from `project_conventions` (see §Phase 3 §"State variants" in the framework reference — `next-file-convention` Server projects land `loading.tsx` / `error.tsx` at the route segment; Client projects land `_loading.tsx` / `_error.tsx` siblings; empty always lives inline inside the loaded component).
-   - Build the structured payload:
+   - Build the structured payload, propagating `flow_intake` answers (Phase 1.5) when present:
      ```json
      {
        "figma_url": "<slot.figma_url>",
@@ -556,9 +664,16 @@ For each page in `flow-graph.pages[]` (in order):
        "semantic_role": "<slot>",
        "trigger": "<slot.trigger or null for empty>",
        "project_conventions": <flow_graph.project_conventions>,
-       "parent_flow_run": "<.claude/d2c/runs/<ts>/flow/>"
+       "parent_flow_run": "<.claude/d2c/runs/<ts>/flow/>",
+       "what":                "<flow_intake.what or 'page'>",
+       "mode":                "<flow_intake.mode or 'functional'>",
+       "viewports":           "<flow_intake.viewports or 'desktop-only'>",
+       "components_to_reuse": "<flow_intake.components_to_reuse or 'use what makes sense'>",
+       "has_api_calls":       "<flow_intake.has_api_calls or 'no'>",
+       "api_calls":           "<flow_intake.api_calls or omit>"
      }
      ```
+     When `flow_intake` is absent (the user passed `--yes`), every right-hand side falls back to the literal default shown — matching the pre-Phase-1.5 behaviour byte-for-byte. When `flow_intake` is present, the answers REPLACE every default; the per-page / per-step dispatch never silently re-invents an answer the user already gave.
    - Validate it: `node skills/d2c-build/scripts/parse-structured-input.js <payload-file>`. Non-zero exit → regenerate from extraction data, retry up to 2 times, then fire **FX-UNKNOWN-FAILURE**.
    - Invoke `/d2c-build` with the validated payload (Phase 1.0 detects the structured input and skips the Q&A gates). The per-variant `component-match.json` lands in the variant's run directory alongside the loaded page's.
    - The loaded variant's `component-match.json` continues to live at `.claude/d2c/runs/<ts>/pages/<node_id>/` — not under `variants/loaded/`. This keeps loaded-only pages' layout unchanged (identity gate, P0.8).
@@ -619,8 +734,33 @@ Skip page-level Phase 2 for any page whose `not_supported_detected[]` entry the 
 3. **Per-page files** — delegate to `/d2c-build` Phase 3 per page, with three flow-specific additions:
    - If the page's `component-match.json` contains a node with `link_target`, wire the handler (see §"Page files"). For `link_target.edge_kind === "step_delta"`, wire to the stepper provider's `next()`/`back()` instead of `router.push` (see §"Stepper groups" in `framework-react-next.md`).
    - If the page is inside a layout, place it at `app/<route>/page.tsx` relative to the layout directory and do NOT re-emit the shell — Next's App Router composes automatically.
-   - If the page is `page_type: "stepper_group"`, do NOT delegate to `/d2c-build` per-page codegen. Instead emit the stepper per §"Stepper groups (single-route multi-step)" in `framework-react-next.md`: one `app/<group_route>/page.tsx`, per-step files under `_steps/`, and a provider under `_state/`. Each step's IR comes from its own `/d2c-build` Phase 2 run (keyed by the step's `node_id`), but the output shape is a step component, not a route page.
-   - When any step inside a stepper group carries `state_variants`, emit the per-step fallback files and wrap that step's slot in the `page.tsx` step array per §"Per-step state variants" in `framework-react-next.md`. Path A (Next file convention) does not apply to stepper steps — `loading.tsx` / `error.tsx` are per-route-segment and cannot target a step index inside a single-route stepper. Steps without `state_variants` render unwrapped so the identity guarantee holds for loaded-only steppers.
+   - If the page is `page_type: "stepper_group"`, the flow emits exactly two files itself — the orchestrator (`app/<group_route>/page.tsx`) and the state context (`app/<group_route>/state/<Group>Context.tsx`) — and **delegates every step body to `/d2c-build` Phase 3**, one dispatch per step. Per §"Stepper groups (single-route multi-step)" in `framework-react-next.md`, each step body is a presentational component at `app/<group_route>/steps/Step<N>.tsx` produced by `/d2c-build` in `what: "component"` mode. The orchestrator imports each step component and wires the provider's `next()` / `back()` / `validity` to the step's `onNext` / `onBack` / `onValidityChange` props. **Why this delegation matters:** every step body now passes through the same six non-negotiables enforcement that route-mode pages already get from `/d2c-build` Phase 3 (reuse, tokens, conventions, library selection, locked decisions, design-tokens drift) — closing the parity gap with route-mode pages.
+
+     For each step (in `stepper_groups[g].steps[]` order), build the structured payload, propagating `flow_intake` exactly the same way as the per-variant dispatch in §Phase 2 step 2a above:
+
+     ```json
+     {
+       "figma_url": "<step.figma_url>",
+       "component_name": "<Group>Step<N>",
+       "output_path": "app/<group_route>/steps/Step<N>.tsx",
+       "what": "component",
+       "semantic_role": "loaded",
+       "trigger": null,
+       "project_conventions": <flow_graph.project_conventions>,
+       "parent_flow_run": "<.claude/d2c/runs/<ts>/flow/>",
+       "mode":                "<flow_intake.mode or 'functional'>",
+       "viewports":           "<flow_intake.viewports or 'desktop-only'>",
+       "components_to_reuse": "<flow_intake.components_to_reuse or 'use what makes sense'>",
+       "has_api_calls":       "<flow_intake.has_api_calls or 'no'>",
+       "api_calls":           "<flow_intake.api_calls or omit>"
+     }
+     ```
+
+     Validate via `parse-structured-input.js` and dispatch as today. The step body is emitted as a pure presentational component — no `'use client'` directive of its own, no router imports, no provider imports. It receives `{ onNext, onBack, onValidityChange?, optional?: boolean }` as props (see `framework-react-next.md` §"Step component prop contract"). The orchestrator owns the provider context and forwards advance/back actions.
+
+     **State variants on stepper steps:** when a step carries `state_variants`, the per-variant dispatch in §Phase 2 step 2a fires per slot at `app/<group_route>/steps/Step<N><Slot>.tsx`. Phase 3 then composes them inside `Step<N>.tsx` per §"Per-step state variants" in `framework-react-next.md`. Path A (Next file convention) does not apply to stepper steps — `loading.tsx` / `error.tsx` are per-route-segment and cannot target a step index inside a single-route stepper. Steps without `state_variants` render unwrapped so the identity guarantee holds for loaded-only steppers.
+
+     **Mobile variants on stepper steps:** when the step's `mobile_variant` is set (Phase 1.5 §1.5b Q7 or a Phase 1 inline `mobile:` directive), the structured payload above adds `viewports: "multiple"` regardless of the flow-level answer, and `/d2c-build`'s Phase 4 dual-viewport pixel-diff fires for the mobile frame as it does for any responsive component. The orchestrator and state context never carry a `mobile_variant` — only step bodies do.
 
 ### Rules carried over from `/d2c-build`
 
@@ -629,34 +769,188 @@ All six non-negotiables apply per page exactly as in `/d2c-build`. Reuse, tokens
 ### Flow-specific rules
 
 - **No invented chrome.** If a page has no button wireable to the outgoing edge, DO NOT inject one. Emit a TODO comment and keep pixel fidelity.
-- **Placement.** Layout + `_state/` + `_components/` all live at the longest common route prefix of the pages they serve. When pages don't share a common prefix, fall back to per-page layouts and no shared state.
+- **Placement.** Layout + `state/` + `_components/` all live at the longest common route prefix of the pages they serve. When pages don't share a common prefix, fall back to per-page layouts and no shared state.
 - **Conventions precedence.** If the project's `conventions` say `declare` via `function` but the layout template in the framework reference uses `default export function`, prefer the project convention (it's more strict).
 
 ---
 
-## Phase 4 — Per-page Visual Verification
+## Phase 4 — Visual Verification
 
-For each page, run the existing `/d2c-build` Phase 4 loop (Playwright screenshot → `pixeldiff.js` → auto-fix up to `max-rounds` times → pass at `threshold`%) once per declared variant.
+Phase 4 runs in **two passes**: a single Playwright **flow-walker** that pixel-diffs every host's `loaded` slot end-to-end (4a), then per-variant `/d2c-build` Phase 4 dispatches for `loading` / `empty` / `error` / `initial` slots that need their own URL visit (4b). The walker subsumes today's per-host loaded dispatch — instead of N independent `page.goto(URL)` runs, one walker drives the real user path: visit start → screenshot → click Next → screenshot → click Next, etc.
 
-- Per-page-per-variant score, pass/fail, auto-fix rounds.
-- One variant's regression does not reset another variant's state, and one page's regression does not reset another page's state.
-- All Phase 4 failure modes from `skills/d2c-build/references/failure-modes.md` apply verbatim per variant.
+This collapses three problems at once:
+1. **Stepper-step pixel-diff parity** — every step's loaded body gets diffed without needing a fragile `click-next` payload field on `/d2c-build`.
+2. **Validation forms get exercised** — auto-fixture data fills `validate: form` steps so Next becomes clickable, which is closer to a real user run than mocking validation off.
+3. **Inter-step regressions are caught** — a step that renders fine in isolation but breaks the stepper context (e.g. setField clobbering shared state) shows up here, where today's per-host dispatch couldn't see it.
 
 ### Flow-level audit file (required)
 
-Before running any variant, create `<run-dir>/flow/audit.json` with `{"pages": [], "warnings": []}`. Then for each page (routes mode and hybrid mode) or each stepper step that carries `state_variants` (stepper mode and hybrid mode):
+Before running either pass, create `<run-dir>/flow/audit.json` with `{"pages": [], "warnings": []}`. Both passes append to this file — the walker writes loaded rows directly; per-variant `/d2c-build` dispatches append non-loaded rows via `audit_path` (today's mechanism).
 
-1. **Seed the page entry.** Push `{"node_id": "<host node_id>", "route": "<route or group_route[/#step-<n>]>", "variants": []}` onto `audit.json.pages[]`. Do this once per host before the variant loop — `/d2c-build` appends to `variants[]` but does NOT create page entries.
-2. **Iterate slots alphabetically** (`empty`, `error`, `loaded`, `loading`), skipping any slot not declared on the host. For every non-stub variant:
-   - Run `/d2c-build` Phase 4 inside the variant's run directory (`.claude/d2c/runs/<ts>/pages/<node_id>/variants/<slot>/` for pages, `.claude/d2c/runs/<ts>/pages/<group_node_id>/steps/<step_node_id>/variants/<slot>/` for stepper steps; for `loaded` on a route-level page the run directory is the per-page root, matching the identity-gate layout).
-   - Pass `audit_path: "<absolute-or-project-root-relative path to flow/audit.json>"` in the structured payload so `/d2c-build` Phase 6 can append this variant's result entry (§"Flow-level audit append" in `skills/d2c-build/SKILL.md`).
-   - Auto-fix is bounded by the same `--max-rounds` as today. A variant that exhausts its budget fires the standard Phase 4 failure; other variants continue.
-3. **Stub entries (error only).** Append `{ "slot": "error", "stub_emitted": true }` to the host's `variants[]` directly (no `/d2c-build` dispatch, no screenshot, no pixel-diff). The placeholder component already exists per Phase 3 §"Error stub" — the audit row flags it so Phase 6 and the P2.4 audit surface can call it out. Simultaneously push an `error_stub_emitted` warning: `{ kind: "error_stub_emitted", route: "<host route>", slot: "error", node_id: "<host node_id>", recommendation: "Replace the dashed-border placeholder at <emitted file path> with a real error design before shipping." }`.
-4. **Drain staged warnings (P2.4).** After seeding all page entries and running the variant loop, iterate the in-memory `flow_graph._pending_audit_warnings[]` list (populated by Phase 1b §"Fallback: sibling-name detection" and by Phase 3 codegen hooks during the same run) and push each into `audit.json.warnings[]`, de-duplicating by `(kind, route, slot, node_id)` — first entry wins. The field is in-memory only: `flow-graph.json` itself is written WITHOUT `_pending_audit_warnings` (the schema's `additionalProperties: false` would reject it, and future runs should not inherit a snapshot from a stale run). When `--skip-phase4` is passed, stage the list to a sidecar file at `<run-dir>/flow/pending-audit-warnings.json` instead, and the next Phase 4 run (manual rerun or subsequent `/d2c-build-flow`) loads + drains that sidecar before starting its variant loop; delete the sidecar on successful drain. Loaded-only flows have no staged warnings and no stubs, so `audit.json.warnings` is `[]`.
+### 4a — Flow-Walker Pixel-Diff (loaded path)
+
+Goal: in one Playwright run, walk the entire flow's loaded path, screenshot each host, pixel-diff against the corresponding Figma export, and auto-fix divergences up to `--max-rounds`.
+
+#### 4a.0 Checkpoint resume
+
+Before generating the walker spec or running any pixel-diff round, check whether a previous walker run was interrupted at this run-dir:
+
+```bash
+node skills/d2c-build-flow/scripts/walker-checkpoint.js status <run-dir>
+```
+
+The script returns one of three states:
+
+- **`state: missing`** — no checkpoint exists. Proceed to §4a.1 and start the walker fresh from host index 0.
+- **`state: ready`** — checkpoint exists AND its `flow_graph_hash` matches the current `flow-graph.json`. Show the user a one-line resume prompt:
+  > "Previous walker run was interrupted at host {host_node_id} ({route}), viewport {viewport}, round {round}, score {score}%. Resume or start fresh?"
+  
+  - **Resume:** read the checkpoint, skip every host already in `rounds_completed[]`, and re-run the current round at the recorded `(host_node_id, viewport, round)`. Snapshots from earlier rounds remain intact under `<run-dir>/flow/walker-snapshots/<host_node_id>/round-<N>/` so regression revert still works on the resumed round.
+  - **Start fresh:** delete the checkpoint via `walker-checkpoint.js delete <run-dir>` and restore every file in `checkpoint.files_touched[]` from its earliest snapshot before starting Phase 4a from scratch. This ensures "start fresh" doesn't leave half-edited orchestrator/state-context files behind.
+- **`state: stale`** — checkpoint exists but its `flow_graph_hash` doesn't match (the user re-ran Phase 2a between sessions). Fire **F-FLOW-WALKER-CHECKPOINT-STALE** (auto-recover) — delete the stale checkpoint and start fresh; log the discard so the user knows the previous walker progress was discarded but don't prompt.
+
+After every round completes (pass / plateau / regression / max-rounds / skipped), persist the updated checkpoint via `walker-checkpoint.js write <run-dir> --in <stdin>`. Atomic write (tmp + rename) ensures a crash mid-write doesn't corrupt the file. The `current_host_index`, `current_viewport`, `current_round` fields advance with each round; `rounds_completed[]` accumulates per-host results; `files_touched[]` and `snapshot_dirs_by_host` track what's been edited and where the snapshots live.
+
+When the walker finishes (every host completed, `current_host_index === flow.pages.length + sum(stepper_groups[*].steps.length)`), delete the checkpoint via `walker-checkpoint.js delete <run-dir>`. The audit.json from §4a.6 is the persistent record from then on; the checkpoint was just a resume artifact.
+
+#### 4a.1 Generate the walker spec
+
+Emit `<run-dir>/flow/flow-walker.spec.ts` from the template at `skills/d2c-build-flow/references/framework-react-next.md` §"Flow-walker spec template" (parallel templates exist in the other framework references — pick by the same branch table as Phase 3 §Preconditions). The walker iterates `flow-graph.json` as follows:
+
+- **Routes-mode hosts** (`pages[i].page_type === "page"`): one block per page — `page.goto(<route>)`, wait for `domcontentloaded` AND for any `data-flow-ready` attribute on `<main>` to appear (the walker emits a `data-flow-ready` hook on every generated page so it knows when first paint is complete; absence falls back to a 750ms settle delay), then screenshot.
+- **Stepper-group virtual pages** (`pages[i].page_type === "stepper_group"`): one block per group — `page.goto(<group_route>)`, screenshot step 1, then for each subsequent step in `stepper_groups[g].steps[]` order: fill form fields per §4a.2 if `validate: form`, click Next per §4a.3, wait for the step transition, screenshot step N. The shared shell bbox is masked via `flow-graph.mask_regions[]` so the stepper indicator's variant change between steps doesn't trigger a false diff.
+- **Mobile pairs**: when the host carries a `mobile_variant`, the same block runs twice — once at the desktop viewport (1280×900) and once at the mobile viewport (390×844, configurable via `--mobile-viewport`). Each viewport pixel-diffs against the matching Figma export.
+
+The walker is generated end-to-end from `flow-graph.json` — no hand-editing. Re-running Phase 4 regenerates it from scratch so a flow-graph change always produces a fresh walker.
+
+#### 4a.2 Auto-fixture for `validate: form` steps
+
+For every stepper step with `validate: form`, the walker fills the form before clicking Next. Fixture values come from the step's IR (`stepper_groups[i].steps[j].state_writes[]` plus per-step form-field metadata from Phase 2):
+
+| Field shape | Auto-fixture value |
+|---|---|
+| `state_writes.type === "string"` | `"sample-<name>"` (`name` from `state_writes.name`, lowercased, hyphenated) |
+| `state_writes.type === "number"` | smallest positive integer satisfying any inferred `min` constraint (default `1`) |
+| `state_writes.type === "boolean"` | `true` |
+| Field name matches `/email/i` OR `<input type="email">` | `"test@example.com"` |
+| Field name matches `/url|website/i` OR `<input type="url">` | `"https://example.com"` |
+| Field name matches `/phone|tel/i` OR `<input type="tel">` | `"5551234567"` |
+| Field name matches `/zip|postal/i` | `"94103"` |
+| Field name matches `/password/i` OR `<input type="password">` | `"Password123!"` |
+| Field name matches `/date/i` OR `<input type="date">` | today's date in `YYYY-MM-DD` |
+
+Above each `fill` block, emit `// TODO: auto-fixture — replace if a regex/business rule rejects this value` so the user can correct without grepping.
+
+**Persistence across reruns** — values are read from and written to `<run-dir>/flow/walker-fixtures.json` (schema at `skills/d2c-build-flow/schemas/walker-fixtures.schema.json`, helper at `skills/d2c-build-flow/scripts/walker-fixtures.js`). On every (step, field) lookup the walker spec calls `walker-fixtures.js get <run-dir> <step-key> <field>` first; an existing entry (`supplied_by: "user"` or `supplied_by: "auto-fixture"`) is used as-is. When the lookup returns `null`, the walker generates a fresh value per the table above and persists it via `walker-fixtures.js merge ... --source auto-fixture`. **User-supplied values always win** — the merge function silently skips an `auto-fixture` write when a `user` entry already exists for the same (step, field) tuple.
+
+This is what makes the **F-FLOW-WALKER-VALIDATION-BLOCKED** prompt non-repeating across reruns: the user supplies real values once (via `walker-fixtures.js merge ... --source user`), they persist on disk, and the next walker run reads them and proceeds without re-prompting. When auto-fixture is exhausted (every value tried, all persisted) and Next remains disabled, fire **F-FLOW-WALKER-VALIDATION-BLOCKED**.
+
+The step key format is `<group_node_id>__step_<N>` where N is the 1-based step index. Use `walker-fixtures.js`'s `buildStepKey(groupNodeId, stepIndex)` helper to produce the canonical key.
+
+#### 4a.3 Stepper navigation
+
+Click Next via `await page.getByRole("button", { name: /next|continue|submit|finish|done|confirm/i }).click()` — same regex as `pick-link-target.js` so the walker and the codegen agree on which button is "Next". Wait for transition via either:
+
+- The `data-stepper-step="<index>"` attribute on `[data-stepper-body]` advancing (the orchestrator emits this — see `framework-react-next.md` §"Page file"), OR
+- A 750ms settle delay if the attribute is absent (older codegen).
+
+For `optional: true` steps where auto-fixture can't satisfy validation, click `Skip` instead: `await page.getByRole("button", { name: /skip/i }).click()`. The walker chooses Skip only when validation blocks Next AND the step is optional.
+
+#### 4a.4 Pixel-diff per screenshot
+
+Reuse `skills/d2c-build/scripts/pixeldiff.js` directly — same CLI shape as today. For each (host, viewport) tuple:
+
+1. Fetch the Figma export via `mcp__Figma__get_screenshot(node_id, viewport)` — for stepper steps, the `node_id` is `stepper_groups[g].steps[j].node_id`; for routes pages it's `pages[i].node_id`; for mobile pairs the `mobile_variant.node_id`.
+2. Run `pixeldiff.js --reference <figma.png> --candidate <playwright.png> --mask <mask_regions.json> --threshold <T>`.
+3. Compare to `--threshold` (default 95%, clamped to [50, 100]).
+
+#### 4a.5 Auto-fix loop (snapshot, revert, plateau, oscillation)
+
+When a (host, viewport) tuple fails pixel-diff, dispatch `/d2c-build` in fix mode for ONLY that host's loaded file. The fix dispatch uses the standard structured-input payload (route page) OR the stepper-step payload (with `stepper_step` set, when the host is a stepper step) plus a new `fix_target: { file_path, screenshot_diff_summary }` key that signals "this is a Phase 4 retry — adjust spacing/colour/sizing to align with the Figma export, do NOT change the prop contract or wiring".
+
+After the fix dispatch, **re-run the walker for that host ONLY** (subset replay) — not the entire flow. The subset replay clones the walker spec, comments out every `test()` block except the one for the failing host, and re-runs Playwright. Bound by `--max-rounds` (default 3, same as today).
+
+**Per-round protocol** — port of `d2c-build/SKILL.md` §Phase 4.4a-d, scoped per (host, viewport):
+
+1. **Snapshot before edits.** Before each round (round N where N ≥ 2), snapshot every file that's about to be edited:
+
+   ```bash
+   node skills/d2c-build-flow/scripts/walker-snapshot.js snapshot \
+     <run-dir>/flow/walker-snapshots/<host_node_id>/round-<N>/ \
+     <files-to-be-edited>
+   ```
+
+   The script copies each file to `<snapshot-dir>/<absolute-path>` atomically (write-tmp + rename). Round 1 has no snapshot — there is no prior state to revert to.
+
+2. **Run pixel-diff.** Same as §4a.4 — fetch Figma export, run `pixeldiff.js`, get a score.
+
+3. **Decide what to do next.** Pass the new score, the previous round's score, the round index, and the score history to `decideNextAction()` (exported from `walker-snapshot.js`). The helper returns one of these verbs:
+
+   | verb | meaning | action |
+   |---|---|---|
+   | `pass` | score ≥ THRESHOLD (95%) | stop autofixing this host; record success in `audit.json` |
+   | `regression` | score dropped > 1pp vs previous | revert from snapshot, attempt ONE alternate fix (next dispatch). If alternate ALSO regresses, fire **F-FLOW-WALKER-REGRESSION** (stop-and-ask) |
+   | `oscillation` | last 3 scores within 2pp range | fire **F-FLOW-WALKER-OSCILLATION** (stop-and-ask) — auto-fix is bouncing between candidates and won't converge |
+   | `plateau-stop` | improvement < 1pp AND score < 80% | fire **F-FLOW-WALKER-PLATEAU** (stop-and-ask) — the user decides whether to accept the lower score or change strategy |
+   | `plateau-ok` | improvement < 1pp AND score ≥ 80% | fire **F-FLOW-WALKER-PLATEAU** as `inform` — log the plateau but stop autofixing; `audit.json.warnings[]` records it for the Phase 6 report |
+   | `max-rounds` | round budget exhausted, still improving | inform; record in `audit.json` with status `max_rounds_exhausted` |
+   | `continue` | improving and budget remains | proceed to round N+1 |
+
+4. **Revert on regression.** When the verb is `regression`, run the script in `revert` mode:
+
+   ```bash
+   node skills/d2c-build-flow/scripts/walker-snapshot.js revert \
+     <run-dir>/flow/walker-snapshots/<host_node_id>/round-<N>/ \
+     <files-to-revert>
+   ```
+
+   This restores every file to its pre-round-N state. Then dispatch `/d2c-build` ONE more time with a different fix strategy (the previous diff summary in `fix_target.previous_failed_strategies[]` so the AI doesn't repeat itself). If the alternate fix ALSO regresses, **F-FLOW-WALKER-REGRESSION** halts the loop with a STOP-AND-ASK.
+
+5. **Shared-component blast-radius check.** Before applying any fix that would edit `state/<Group>Context.tsx` or the orchestrator (files used by every step), STOP-AND-ASK with **F-FLOW-WALKER-SHARED-BLAST**. Editing those files affects every step, so a fix that improves step 3 might regress steps 1, 2, and 4 — surface the blast radius before the user accepts the change.
+
+6. **Lock check.** Before any fix dispatch, verify the locked decisions still hold:
+
+   ```bash
+   node skills/d2c-build-flow/scripts/validate-flow-graph.js <run-dir>/flow/flow-graph.json \
+     --verify-lock <run-dir>/flow/flow-decisions-lock.json
+   ```
+
+   A locked-value mismatch fires **F-FLOW-LOCK-CONFLICT** — the auto-fix loop is about to drift from the IR. Resolve per the F-FLOW-LOCK-CONFLICT protocol before proceeding (the user either reverts the IR or marks the entry `failed`).
+
+After the budget is exhausted (`action: "max-rounds"`), fire the standard Phase 4 failure (`P4-PIXEL-DIFF-EXHAUSTED`) for that host.
+
+#### 4a.6 Audit.json append (loaded rows)
+
+The walker writes loaded rows directly into `audit.json` — no separate `/d2c-build` dispatch needed. For each host:
+
+```json
+{
+  "node_id": "<step.node_id or page.node_id>",
+  "route": "<route or group_route#step-N>",
+  "variants": [
+    { "slot": "loaded", "viewport": "desktop", "final_score": 98.5, "rounds": 1, "status": "pass" },
+    { "slot": "loaded", "viewport": "mobile",  "final_score": 97.2, "rounds": 0, "status": "pass" }
+  ]
+}
+```
+
+The `viewport` field is new (Phase 1.5 mobile collection): per-variant rows render one entry per viewport when `mobile_variant` is set, else one entry. Loaded-only desktop flows produce `[{slot:"loaded", final_score, rounds, status}]` (no viewport key) for byte-identical compatibility with the pre-Phase-4-walker audit shape — the identity-gate fixtures stay green.
+
+### 4b — Per-variant Pixel-Diff (non-loaded slots)
+
+Unchanged from today's behaviour for `loading` / `empty` / `error` / `initial` slots. For each host that carries a `state_variants` block, iterate slots alphabetically (`empty`, `error`, `loaded`, `loading`) **skipping `loaded` (covered by 4a)** and dispatch `/d2c-build` Phase 4 per non-loaded variant exactly as today:
+
+1. **Seed the page entry** if 4a hasn't already (e.g. a host with state_variants but no participation in the walker — rare, e.g. an overlay page reachable only via a button on another page). Push `{"node_id", "route", "variants": []}` onto `audit.json.pages[]`. 4a's loaded-row append uses upsert semantics keyed on `node_id`, so seeding twice is safe.
+2. **Iterate non-loaded slots.** For every non-stub variant:
+   - Run `/d2c-build` Phase 4 inside the variant's run directory (`.claude/d2c/runs/<ts>/pages/<node_id>/variants/<slot>/` for pages, `.claude/d2c/runs/<ts>/pages/<group_node_id>/steps/<step_node_id>/variants/<slot>/` for stepper steps).
+   - Pass `audit_path: "<absolute-or-project-root-relative path to flow/audit.json>"` in the structured payload so `/d2c-build` Phase 6 appends this variant's result entry.
+   - Auto-fix is bounded by the same `--max-rounds` as today.
+3. **Stub entries (error only).** Append `{ "slot": "error", "stub_emitted": true }` to the host's `variants[]` directly (no `/d2c-build` dispatch, no screenshot, no pixel-diff). Simultaneously push an `error_stub_emitted` warning: `{ kind: "error_stub_emitted", route, slot: "error", node_id, recommendation: "Replace the dashed-border placeholder at <emitted file path> with a real error design before shipping." }`.
+4. **Drain staged warnings (P2.4).** After both passes complete, iterate `flow_graph._pending_audit_warnings[]` (populated by Phase 1b sibling-name detection and Phase 3 codegen hooks) and push each into `audit.json.warnings[]`, de-duplicating by `(kind, route, slot, node_id)` — first entry wins. The in-memory list is dropped from `flow-graph.json` (schema's `additionalProperties: false` would reject it). When `--skip-phase4` is passed, stage the list to `<run-dir>/flow/pending-audit-warnings.json` instead; the next Phase 4 run loads and drains the sidecar before starting.
 
 ### Identity guarantee
 
-Loaded-only flows (no `state_variants` on any host) still produce `audit.json` so Phase 6 has a single source of truth, but each page entry carries exactly one `{slot: "loaded", …}` row. The Phase 6 report collapses single-variant pages back to the pre-change one-row-per-page layout, so loaded-only output is unchanged from the user's perspective (P0.8 identity gate still holds at the report level; the new `audit.json` file is additive scaffolding, not user-visible churn).
+Loaded-only flows (no `state_variants` on any host, no `mobile_variant` on any host) produce the same `audit.json` as before — one `{slot:"loaded"}` row per page, no `viewport` key. The Phase 6 report collapses single-variant pages back to the pre-change one-row-per-page layout. P0.8 identity gate still holds at the report level; the new flow-walker is invisible on identity-fixture flows because it produces the same row shape today's per-host dispatch did. Loaded-only stepper flows now also get pixel-diff coverage (today's per-host dispatch silently skipped them), so the per-step row count goes from 0 to N — that's a deliberate output change, not an identity violation, and it's the parity move task #6 was scoped to deliver.
 
 ### Audit shape (canonical)
 
@@ -711,6 +1005,7 @@ Warning kinds (closed set — extend by adding a row here and wiring the produce
 | `fallback_collision` | Phase 1b §"Fallback: sibling-name detection" | yes | `{ name: string, other_node_id: string }` — `node_id` on the warning points at the losing sibling, `other_node_id` at the winner. |
 | `missing_mobile_counterpart` | Phase 3 §"Mobile × state composition" | yes | `{ mobile_strategy: "inherit-from-loaded" }` — matches the audit-hook payload from `framework-react-next.md`. |
 | `a11y_missing_heading` | Phase 3 §"Accessibility" (empty variant) | yes (`"empty"`) | `{ reason: "no-heading-in-empty-frame" }` — emitted when the empty variant's Figma frame has no text large enough to serve as a heading and codegen had to insert a `sr-only` fallback. |
+| `walker_plateau` | Phase 4a (auto-fix loop) | yes (`"loaded"`) | `{ final_score: number, plateau_reason: "improvement_below_threshold", viewport: "desktop" \| "mobile" }` — emitted when the walker auto-fix plateaued at score ≥80% (inform tier — see F-FLOW-WALKER-PLATEAU). Plateaus below 80% are not warnings, they're STOP-AND-ASK failures and never reach this table. |
 
 Rules:
 
@@ -768,11 +1063,46 @@ npx playwright test <path-to-spec>
 
 ---
 
-## Phase 5 — Per-page Audit
+## Phase 5 — Per-page Audit + Bucket F-Flow Honor Checks
 
-For each page, run the existing `/d2c-build` Phase 5 audit unchanged (hardcoded values, library violations, IR unauthorised imports, convention conflicts).
+Phase 5 runs in two passes — `/d2c-build` Phase 5 audit per page (today's behaviour, extended to per-step files for stepper groups) **plus** a new flow-specific Bucket F enforcement pass on files the flow emits directly. The two passes catch different things: per-page audit catches in-component violations (hardcoded values, missing imports, library violations); Bucket F-Flow catches orchestration-layer violations the per-page audit can't see (orchestrator imports a rogue shell, state context is missing `markStepValid`, walker spec doesn't cover step 3, etc.).
 
-Aggregate violations across pages for the final report.
+### 5a — Per-page audit (delegated to `/d2c-build` Phase 5)
+
+For each page in `flow-graph.pages[]`, run the existing `/d2c-build` Phase 5 audit (hardcoded values, library violations, IR unauthorised imports, convention conflicts):
+
+- **Routes-mode pages and standalone hybrid pages:** audit the single emitted route file (`app/<route>/page.tsx` or framework equivalent) — unchanged from prior behaviour.
+- **`page_type: "stepper_group"` virtual pages:** the group emits multiple files (the orchestrator `page.tsx`, the state context under `state/<Group>Context.tsx`, and one step component per declared step under `steps/Step<N>.tsx`). Run `/d2c-build` Phase 5 audit **on each emitted file independently** so the same six non-negotiables apply to every step body, the orchestrator, and the state context. Report rows are grouped under the group's `route` with a sub-row per file (`steps/StepEmail.tsx`, etc.) so the user can pinpoint which step file violated which rule.
+
+Aggregate violations across pages and (for stepper groups) per-file rows for the final report.
+
+### 5b — Bucket F-Flow honor checks (flow-emitted files)
+
+`/d2c-build` per-file audits don't know what the FLOW expected — only what the per-page IR expected. The orchestrator could import a rogue shell that has nothing to do with `flow-graph.layouts[]`, the state context could be missing `markStepValid` even though `validation_enabled === true`, and `/d2c-build`'s Bucket F wouldn't catch it because those files weren't part of any per-page IR. Bucket F-Flow plugs that gap.
+
+Invoke `validate-honor-flow.js` with the run directory and every flow-emitted file:
+
+```bash
+node skills/d2c-build-flow/scripts/validate-honor-flow.js <run-dir> \
+  app/<group_route>/page.tsx \
+  app/<group_route>/state/<Group>Context.tsx \
+  components/<flow_name>/<Layout>.tsx \
+  tests/flow/<flow_name>-navigation.spec.ts \
+  <run-dir>/flow/flow-walker.spec.ts \
+  --tokens .claude/d2c/design-tokens.json
+```
+
+The script auto-categorises each input file by path pattern (orchestrator → `app/<route>/page.tsx`, state context → `state/*Context.tsx`, walker spec → `*flow-walker.spec.ts`, nav-smoke spec → `*flow-navigation.spec.ts`). It runs five buckets:
+
+- **F1-Flow** — every PascalCase component import resolves to either `flow-graph.layouts[].component_id` (shared shell), `design-tokens.components[]` (project component reuse), or `app/<route>/steps/Step<N>.tsx` (delegated step body). Other imports are unauthorized → fire **F-FLOW-HONOR-COMPONENT-UNAUTHORIZED** (stop-and-ask).
+- **F2-Flow** — every Tailwind/inline hardcoded value with a matching token in `design-tokens.json` → fire **F-FLOW-HONOR-TOKEN-UNAUTHORIZED** (stop-and-ask).
+- **F3-Flow** — orchestrator imports each step from `app/<group_route>/steps/Step<N>.tsx`, passes `onNext` + `onBack` as props on every `<Step…>` JSX usage, and (when `group.validation_enabled === true`) wires `onValidityChange` to `markStepValid`. State context exports `next` / `back` / `goTo` / `data` / `setField` (and `markStepValid` when validation is enabled). Violations → fire **F-FLOW-HONOR-PROP-CONTRACT** (stop-and-ask).
+- **F4-Flow** — nav-smoke spec asserts every edge in `flow-graph.edges[]` (matched by either the destination route appearing in a `page.goto` or the literal `// edge <from>-><to>` comment). Missing edges → fire **F-FLOW-HONOR-EDGE-MISSING** (inform; auto-add a TODO at the appropriate spec location).
+- **F5-Flow** — flow-walker spec covers every host (every page + every stepper step's loaded slot) at every required viewport (desktop + mobile when the host carries `mobile_variant`). Missing coverage → fire **F-FLOW-HONOR-WALKER-COVERAGE** (inform; auto-add a TODO).
+
+Exit-code contract mirrors `/d2c-build`'s `validate-honor.js`: 0 = ok, 1 = violations found, 2 = CLI misuse. Stdout format is line-per-key with `validate-honor-flow: ok | fail`, per-bucket counts, and per-violation `violation: F<N>-Flow <file>:<line> — <description>` lines so the report can grep for them.
+
+**Why two passes instead of one?** Per-page audit and Bucket F-Flow have different blast radii. A per-page audit failure isolates to one file (re-run codegen for that file). A Bucket F-Flow failure usually indicates the orchestration layer drifted from the IR — the fix often involves regenerating the orchestrator + state context together, not patching one file. Keeping them as separate passes keeps the failure-recovery story clean.
 
 ---
 
@@ -848,7 +1178,7 @@ Step 2: https://www.figma.com/design/abc/Onboarding?node-id=3-4  title: "Verify"
 Step 3: https://www.figma.com/design/abc/Onboarding?node-id=5-6  title: "Profile"
 ```
 
-Expected: a single virtual page at `/onboarding`, a stepper group containing the three steps, one `OnboardingShell` layout if detected, `_steps/StepEmail.tsx` + `StepVerify.tsx` + `StepProfile.tsx`, `_state/OnboardingContext.tsx` with `currentStep`, URL never changes when clicking Next, browser-back undoes a step.
+Expected: a single virtual page at `/onboarding`, a stepper group containing the three steps, one `OnboardingShell` layout if detected, `steps/StepEmail.tsx` + `StepVerify.tsx` + `StepProfile.tsx`, `state/OnboardingContext.tsx` with `currentStep`, URL never changes when clicking Next, browser-back undoes a step.
 
 **Example 4 — signup hybrid (stepper + standalone routes)**
 

@@ -31,7 +31,7 @@ pages/
 components/
   onboarding/
     OnboardingLayout.tsx            # shared shell (if layouts[] non-empty)
-    _state/
+    state/
       OnboardingContext.tsx         # provider + typed hook (if shared_state[] non-empty)
 ```
 
@@ -46,7 +46,7 @@ Pages Router has no `layout.tsx` convention. Use the per-page `getLayout` patter
 ```tsx
 // components/onboarding/OnboardingLayout.tsx
 import type { ReactNode } from "react";
-import { OnboardingProvider } from "./_state/OnboardingContext";
+import { OnboardingProvider } from "./state/OnboardingContext";
 import { SharedShell } from "./SharedShell";
 
 type Props = { children: ReactNode };
@@ -97,9 +97,9 @@ Rules:
 
 ---
 
-## Shared state provider (`_state/<FlowName>Context.tsx`)
+## Shared state provider (`state/<FlowName>Context.tsx`)
 
-Identical to the App Router variant — see `framework-react-next.md` §"Shared state provider" for both the in-memory and sessionStorage templates, including the typed-interface variant when `pages[].state_writes` are populated. The file simply lives under `components/<flow_name>/_state/` instead of `app/<flow_name>/_state/`, and the provider wraps the page via the `getLayout` helper above.
+Identical to the App Router variant — see `framework-react-next.md` §"Shared state provider" for both the in-memory and sessionStorage templates, including the typed-interface variant when `pages[].state_writes` are populated. The file simply lives under `components/<flow_name>/state/` instead of `app/<flow_name>/state/`, and the provider wraps the page via the `getLayout` helper above.
 
 `"use client"` is not required in Pages Router — every rendered page is a client component by default.
 
@@ -144,7 +144,7 @@ See `framework-react-next.md` §"Navigation smoke test" for the template. The `p
 ## Placement decisions
 
 - **Layout location:** `components/<flow_name>/OnboardingLayout.tsx`. There is no folder-scoped layout in Pages Router, so the layout lives outside `pages/` alongside other shared components.
-- **State provider:** `components/<flow_name>/_state/OnboardingContext.tsx`. Leading underscore is a directory hint, not a routing rule (Pages Router doesn't have `_`-prefixed segments the way App Router does — it's for human organisation here).
+- **State provider:** `components/<flow_name>/state/OnboardingContext.tsx`. Pages Router doesn't have `_`-prefixed routing rules, so no underscore is needed — the folder is purely organisational.
 - **Shared components:** `components/<flow_name>/` for flow-specific shared components; reused components keep their existing paths from `design-tokens.components[]`.
 
 ---

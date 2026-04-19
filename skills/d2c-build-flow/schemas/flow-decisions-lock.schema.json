@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://d2c.dev/ir/flow-decisions-lock.schema.json",
+  "title": "d2c Flow Decisions Lock",
+  "description": "Per-decision lock file emitted by /d2c-build-flow Phase 2a step 9 immediately after flow-graph.json validates. Freezes every flow-level choice (mode, shell, project_conventions, stepper_groups) plus per-page and per-edge decisions so Phase 3/4/5 retries converge instead of silently re-deciding. Mirrors skills/d2c-build/schemas/decisions-lock.schema.json — same lifecycle (locked → failed → re-locked), same failed_by enum, same atomic-write semantics. The flow_graph_hash field anchors this lock to a specific flow-graph.json; a hash mismatch on resume fires F-FLOW-LOCK-MISSING (auto-recover, regenerate).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "locked_at",
+    "flow_graph_hash",
+    "flow_decisions",
+    "page_decisions",
+    "edge_decisions"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Lock artifact schema version. v1 only in MVP."
+    },
+    "locked_at": {
+      "type": "string",
+      "description": "ISO 8601 timestamp (with timezone) of when this lock file was first written. Re-locks after a 'failed' status update keep this field; only the per-decision locked_at advances."
+    },
+    "flow_graph_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 hex of the flow-graph.json content this lock was derived from. Used by Phase 4 walker checkpoint and any resume path to detect drift between lock and IR. Mismatch => fire F-FLOW-LOCK-MISSING and regenerate the lock."
+    },
+    "flow_decisions": {
+      "$ref": "#/definitions/flow_decisions",
+      "description": "Top-level flow-shape decisions (mode + shell + project_conventions). One lock entry per decision."
+    },
+    "page_decisions": {
+      "type": "object",
+      "description": "Per-page locked decisions. Keys are page node_id from flow-graph.pages[]; values are objects whose own keys are decision names (e.g. 'route', 'layout_applied', 'mobile_variant_figma_url') and values are lock entries.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/definitions/lock_entry"
+        }
+      }
+    },
+    "edge_decisions": {
+      "type": "object",
+      "description": "Per-edge locked decisions. Keys are '<from_node_id>__<to_node_id>' (forming a unique edge identifier); values are objects whose keys are decision names ('source_component_node_id', 'trigger', 'condition_kind', 'condition_field', 'condition_value') and values are lock entries.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/definitions/lock_entry"
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "lock_entry": {
+      "type": "object",
+      "required": ["value", "status", "locked_at"],
+      "description": "A single locked decision. 'locked' is immutable; only 'failed' may be re-decided on retry. failure_reason / failed_at / failed_by are present only when status === 'failed'.",
+      "properties": {
+        "value": {
+          "description": "The locked value. Type depends on the decision: string ('routes' | 'stepper' | 'hybrid' for mode), boolean (shell_detected), null (unset), object (project_conventions sub-blocks), or array (stepper_groups). Validators cross-check against the current flow-graph.json.",
+          "type": ["string", "number", "boolean", "object", "array", "null"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["locked", "failed"],
+          "description": "'locked' = immutable, do not re-decide. 'failed' = may be re-decided on retry; downstream phases may overwrite with a new value + locked_at."
+        },
+        "locked_at": {
+          "type": "string",
+          "description": "ISO 8601 timestamp when this decision was locked (or re-locked after re-decision)."
+        },
+        "failure_reason": {
+          "type": "string",
+          "description": "Present only when status is 'failed'. Human-readable explanation of why this decision needs re-decision (e.g. 'Phase 4a walker pixel-diff exhausted max-rounds at 78% on /onboarding step 2')."
+        },
+        "failed_at": {
+          "type": "string",
+          "description": "Present only when status is 'failed'. ISO 8601 timestamp when failure was marked."
+        },
+        "failed_by": {
+          "type": "string",
+          "enum": ["phase3_codegen", "phase4_walker", "phase4b_navsmoke", "phase5_audit", "user_override"],
+          "description": "Present only when status is 'failed'. Which mechanism marked the failure. phase4_walker covers the unified flow-walker; phase4b_navsmoke covers the navigation smoke test."
+        }
+      },
+      "additionalProperties": false
+    },
+    "flow_decisions": {
+      "type": "object",
+      "required": [
+        "mode",
+        "mode_source",
+        "shell_detected",
+        "project_conventions",
+        "stepper_groups"
+      ],
+      "description": "Top-level flow decisions. Each field is itself a lock_entry. mode_confidence and shell_node_id are conditionally required (mode_confidence when mode_source === 'auto'; shell_node_id when shell_detected.value === true).",
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/lock_entry",
+          "description": "value MUST be one of 'routes' | 'stepper' | 'hybrid'. The auto sentinel is never stored — it's resolved to a terminal value before the lock is written."
+        },
+        "mode_source": {
+          "$ref": "#/definitions/lock_entry",
+          "description": "value MUST be 'explicit' | 'auto'. Tracks whether the mode came from a user directive or auto-detection."
+        },
+        "mode_confidence": {
+          "$ref": "#/definitions/lock_entry",
+          "description": "value MUST be a number in [0, 1]. Present when mode_source === 'auto'; absent when mode_source === 'explicit'."
+        },
+        "shell_detected": {
+          "$ref": "#/definitions/lock_entry",
+          "description": "value MUST be a boolean. True when detect-shared-shell.js identified a shared layout component above threshold."
+        },
+        "shell_node_id": {
+          "$ref": "#/definitions/lock_entry",
+          "description": "value MUST be a string (Figma node id of the shared shell). Present only when shell_detected.value === true."
+        },
+        "project_conventions": {
+          "type": "object",
+          "required": ["component_type", "error_boundary_kind", "data_fetching_kind"],
+          "description": "Each sub-decision is its own lock_entry. The flow's per-variant /d2c-build dispatches read these via the structured-input payload.",
+          "properties": {
+            "component_type": {
+              "$ref": "#/definitions/lock_entry",
+              "description": "value MUST be 'server' | 'client' | 'mixed'."
+            },
+            "error_boundary_kind": {
+              "$ref": "#/definitions/lock_entry",
+              "description": "value MUST be 'next-file-convention' | 'react-error-boundary' | 'custom-class' | 'none'."
+            },
+            "data_fetching_kind": {
+              "$ref": "#/definitions/lock_entry",
+              "description": "value MUST be 'server-component-fetch' | 'react-query' | 'swr' | 'custom-hook' | 'none'."
+            }
+          },
+          "additionalProperties": false
+        },
+        "stepper_groups": {
+          "$ref": "#/definitions/lock_entry",
+          "description": "value MUST be an array of stepper-group lock summaries: [{name, route, validation_enabled, persistence}]. Empty array for mode === 'routes'."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

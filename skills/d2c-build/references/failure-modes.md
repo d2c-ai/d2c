@@ -67,6 +67,8 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 | P3-PROP-MISMATCH | 3 | stop-and-ask | Chosen component lacks required prop |
 | P3-FRAMEWORK-REF-MISSING | 3 | inform | Framework reference file not found |
 | P3-FILE-PLACEMENT | 3 | stop-and-ask | No standard component directory exists |
+| P3-STEPPER-NEXT-MISSING | 3 | stop-and-ask | Stepper step has no wireable Next button |
+| P3-STEPPER-FIELD-NAME-MISMATCH | 3 | inform | Stepper step's `state_writes` name doesn't match a design field |
 | P4-DEV-SERVER | 4 | stop-and-ask | Dev server not running or unreachable |
 | P4-PLAYWRIGHT-CRASH | 4 | auto-recover | Playwright error (non-connection) |
 | P4-PIXELDIFF-MISSING | 4 | inform | pixeldiff.js not found |
@@ -526,6 +528,36 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 
 **User prompt:**
 > "I need to create a new component file but couldn't find a standard component directory. Where should I put new components? Please provide a directory path (e.g., `src/components/`)."
+
+---
+
+### P3-STEPPER-NEXT-MISSING — Stepper step has no wireable Next button
+
+- **Phase:** 3 (stepper-step mode only)
+- **Tier:** stop-and-ask
+- **Trigger:** The structured-input payload set `stepper_step` and `stepper_step.next_button_node_id` is null AND no component in the design's Figma metadata matches the Next-text heuristic (`/next|continue|submit|finish|done|confirm/i` on the component's Figma name).
+- **Action:** Halt. Surface the design's component list and ask the user to identify the Next button — or confirm it's intentionally absent (in which case the stepper orchestrator's footer Next is the only advance affordance and the step body emits with only Back wiring).
+- **Max retries:** N/A
+- **Lock impact:** none
+- **Related rule:** SKILL.md §"Stepper step mode" wiring rule 3
+
+**User prompt:**
+> "I'm generating step <N> of the <Group> stepper but couldn't find a Next button in the design that I can wire to `onNext`. Options: (a) the design has a Next button I missed — paste its Figma node id; (b) the step body has no Next button by design — the orchestrator's footer Next handles advance; (c) abort and let me re-check the Figma frame."
+
+---
+
+### P3-STEPPER-FIELD-NAME-MISMATCH — Stepper step's state_writes name doesn't match a design field
+
+- **Phase:** 3 (stepper-step mode only)
+- **Tier:** inform
+- **Trigger:** A `stepper_step.state_writes[i].name` did not match any form field in the design (case-insensitive, kebab/camel/snake-case tolerant).
+- **Action:** Emit the field as uncontrolled (no `value` / `onChange` wiring) and stage a `state_write_unwired` warning for the Phase 5 audit so the user knows the state slice is unwired.
+- **Max retries:** N/A
+- **Lock impact:** none
+- **Related rule:** SKILL.md §"Stepper step mode" wiring rule 4
+
+**Audit warning text:**
+> "Step <N> declares `state_writes.<name>` but no field in the Figma design matched that name. The field is emitted uncontrolled — `data.<name>` and `setField('<name>', ...)` will never fire. Either rename the IR's `state_writes[i].name` to match a real field, or remove the entry."
 
 ---
 

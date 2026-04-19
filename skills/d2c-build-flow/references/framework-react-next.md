@@ -22,7 +22,7 @@ Given `flow-graph.json` with `flow_name = "onboarding"` and a shared layout, Pha
 app/
   onboarding/
     layout.tsx                       # shared shell (if layouts[] non-empty)
-    _state/
+    state/
       OnboardingContext.tsx          # provider + typed hook (if shared_state[] non-empty)
     step-1/
       page.tsx                       # generated from pages[0]
@@ -32,7 +32,7 @@ app/
       page.tsx
 ```
 
-When pages use explicit routes outside the `flow_name` tree (e.g. `/signup`, `/signup/verify`), files go under those exact paths (`app/signup/page.tsx`, `app/signup/verify/page.tsx`, etc.). `layout.tsx` and `_state/` are emitted at the longest common route prefix.
+When pages use explicit routes outside the `flow_name` tree (e.g. `/signup`, `/signup/verify`), files go under those exact paths (`app/signup/page.tsx`, `app/signup/verify/page.tsx`, etc.). `layout.tsx` and `state/` are emitted at the longest common route prefix.
 
 ---
 
@@ -42,7 +42,7 @@ Emit when `flow-graph.layouts[]` is non-empty. One layout file per `layouts[]` e
 
 ```tsx
 import type { ReactNode } from "react";
-import { OnboardingProvider } from "./_state/OnboardingContext";
+import { OnboardingProvider } from "./state/OnboardingContext";
 // + imports for the shared shell component reused from design-tokens.components[]
 // or generated as a new component inside _components/
 
@@ -66,7 +66,7 @@ Rules:
 
 ---
 
-## Shared state provider (`_state/<FlowName>Context.tsx`)
+## Shared state provider (`state/<FlowName>Context.tsx`)
 
 Emit when `flow-graph.shared_state[]` is non-empty. One module per state slice. The template branches on `shared_state[i].persistence`.
 
@@ -418,8 +418,8 @@ Rules:
 ## Placement decisions
 
 - **Layout prefix:** longest common prefix of all page routes. For `[/a, /a/b, /a/c]` the layout lives at `app/a/layout.tsx`. For `[/x, /y]` no shared layout is emitted (there is no meaningful prefix).
-- **State provider:** placed inside the layout directory as `_state/`. The leading underscore tells Next this is not a routable segment.
-- **Shared components:** placed inside `_components/` sibling to `_state/` when newly generated. Reused components keep their existing paths from `design-tokens.components[]`.
+- **State provider:** placed inside the layout directory as `state/`. The folder name doesn't need an underscore prefix — it contains no `page.tsx`, so Next won't treat it as a route segment.
+- **Shared components:** placed inside `_components/` sibling to `state/` when newly generated. Reused components keep their existing paths from `design-tokens.components[]`.
 
 ---
 
@@ -721,7 +721,7 @@ Supported shapes (from `flow-graph.edges[].condition`):
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useOnboarding } from "../_state/OnboardingContext";
+import { useOnboarding } from "../state/OnboardingContext";
 
 export default function OnboardingStep2() {
   const router = useRouter();
@@ -879,11 +879,11 @@ For `stepper_groups[0] = { name: "Onboarding", route: "/onboarding", steps: [{ t
 app/
   onboarding/
     page.tsx                         # the stepper page — lives at the group's route
-    _steps/
+    steps/
       StepEmail.tsx                  # one file per stepper step (named by title)
       StepVerify.tsx
       StepProfile.tsx
-    _state/
+    state/
       OnboardingContext.tsx          # provider owning currentStep + shared form state
     _components/                     # existing — any stepper-specific shared bits
 ```
@@ -895,7 +895,7 @@ For `mode: hybrid` the stepper group coexists with standalone `page.tsx` files u
 The stepper provider extends the existing shared-state shape with `currentStep` and, when `validation_enabled: true`, per-step validity flags. Persistence mirrors [§Shared state provider](#shared-state-provider-_statesflownamecontexttsx) — emit `useState` when `validation_enabled: false`, `useReducer` when `true`.
 
 ```tsx
-// app/onboarding/_state/OnboardingContext.tsx
+// app/onboarding/state/OnboardingContext.tsx
 "use client";
 
 import { createContext, useContext, useReducer, useState, useEffect, ReactNode } from "react";
@@ -1001,10 +1001,10 @@ When `validation_enabled: true`, swap `useState` for a `useReducer` with actions
 "use client";
 
 import { useEffect } from "react";
-import { OnboardingProvider, useOnboarding } from "./_state/OnboardingContext";
-import StepEmail from "./_steps/StepEmail";
-import StepVerify from "./_steps/StepVerify";
-import StepProfile from "./_steps/StepProfile";
+import { OnboardingProvider, useOnboarding } from "./state/OnboardingContext";
+import StepEmail from "./steps/StepEmail";
+import StepVerify from "./steps/StepVerify";
+import StepProfile from "./steps/StepProfile";
 // Shared shell component — detected via flow-graph.stepper_groups[0].shell_component_node_id
 import OnboardingShell from "@/components/OnboardingShell";
 
@@ -1050,6 +1050,7 @@ function OnboardingStepperBody() {
         role="region"
         aria-labelledby={`stepper-title-${currentStep}`}
         data-stepper-body
+        data-stepper-step={currentStep}
       >
         <h2 id={`stepper-title-${currentStep}`} className="sr-only">
           Step {currentStep + 1} of {totalSteps}: {STEP_TITLES[currentStep]}
@@ -1082,30 +1083,72 @@ Where the shell component `OnboardingShell` reads `flow-graph.stepper_groups[0].
 
 ### Step components
 
-Each `_steps/Step<Title>.tsx` is its own component. Wire form fields to `useOnboarding().setField(key, value)` and, when the step has `validate: form`, call `markStepValid(currentStep, <boolean>)` on every field change.
+**Each step body is generated by `/d2c-build` Phase 3, not by this template.** The flow's Phase 3 dispatches `/d2c-build` once per step in stepper-step mode (see `/d2c-build/SKILL.md` §"Stepper step mode") with the structured payload shape documented in `/d2c-build-flow/SKILL.md` §Phase 3 step 3. The result is a presentational component at `app/<group_route>/steps/Step<Title>.tsx` that:
 
-```tsx
-// app/onboarding/_steps/StepEmail.tsx
-"use client";
+- Has **no** `'use client'` directive of its own (the orchestrator owns it).
+- Imports **no** stepper provider hook (`useOnboarding`, etc.) — all wiring flows through props.
+- Implements the standard step prop contract `{ onNext, onBack, onValidityChange?, optional?, data?, setField? }`.
 
-import { useOnboarding } from "../_state/OnboardingContext";
+This delegation is the source of stepper-step parity with route pages: the same six non-negotiables (reuse, tokens, conventions, library selection, locked decisions, design-tokens drift) that protect every route page now protect every step body.
 
-export default function StepEmail() {
-  const { data, setField } = useOnboarding();
-  return (
-    <form>
-      <label>
-        Email
-        <input
-          type="email"
-          value={data.email}
-          onChange={(e) => setField("email", e.target.value)}
-        />
-      </label>
-    </form>
-  );
+#### Step component prop contract
+
+```ts
+export type Step<Title>Props = {
+  onNext: () => void;                                  // wired by orchestrator to provider.next()
+  onBack: () => void;                                  // wired to provider.back(); first step renders disabled
+  onValidityChange?: (valid: boolean) => void;         // wired to markStepValid(currentStep, valid) when validate: form
+  optional?: boolean;                                  // mirrors stepper_groups[].steps[i].optional
+  data?: { /* narrowed to step's state_writes */ };    // wired to provider.data
+  setField?: <K extends keyof StepData>(key: K, value: StepData[K]) => void;
+};
+
+export default function Step<Title>(props: Step<Title>Props) {
+  // /d2c-build emits the design's JSX here — Next button onClick={props.onNext},
+  // Back button onClick={props.onBack}, form fields wired to props.data + props.setField,
+  // validity reported via props.onValidityChange when stepper_step.validation_required.
 }
 ```
+
+#### Orchestrator → step wiring
+
+The orchestrator (`page.tsx`, emitted by this template) owns the provider context and forwards everything as props:
+
+```tsx
+// app/onboarding/page.tsx — replaces the flat stepContent array shown above
+const stepContent = [
+  <StepEmail
+    key="email"
+    onNext={next}
+    onBack={back}
+    onValidityChange={(v) => markStepValid(0, v)}
+    data={data}
+    setField={setField}
+  />,
+  <StepVerify
+    key="verify"
+    onNext={next}
+    onBack={back}
+    onValidityChange={(v) => markStepValid(1, v)}
+    data={data}
+    setField={setField}
+  />,
+  <StepProfile
+    key="profile"
+    onNext={next}
+    onBack={back}
+    optional={true}
+    data={data}
+    setField={setField}
+  />,
+][currentStep];
+```
+
+The orchestrator never reads from inside a step body — the prop contract is the only interface. This keeps step bodies decoupled from the specific provider implementation, so a future provider rewrite (e.g. switching from `useState` to `useReducer` to Redux) doesn't ripple into any of the `/d2c-build`-generated step files.
+
+#### Why the prop contract — not the provider hook
+
+Earlier versions of this template had each step body import `useOnboarding()` directly. That coupled `/d2c-build`'s emission to the flow's specific provider name and shape, which prevented the cleanest delegation: `/d2c-build` would have had to know which flow was dispatching it. The prop-based contract removes that coupling — `/d2c-build` emits a generic component shape that the flow's orchestrator decorates. The downside is one extra wiring layer in the orchestrator (the JSX block above), and that's worth it for the parity guarantee.
 
 ### Per-step state variants
 
@@ -1118,7 +1161,7 @@ File layout (extending the base stepper layout above):
 ```
 app/onboarding/
   page.tsx
-  _steps/
+  steps/
     StepEmail.tsx                  # loaded body — unchanged
     StepVerify.tsx
     StepVerifyLoading.tsx          # only when steps[1].state_variants.loading is declared
@@ -1128,7 +1171,7 @@ app/onboarding/
     StepProfile.tsx
 ```
 
-Naming: `<GroupName>Step<Title><SlotPascal>` where `<Title>` is the step's `title` field (same source that drives `_steps/Step<Title>.tsx` today). Examples: `OnboardingStepVerifyLoading`, `OnboardingStepVerifyError`.
+Naming: `<GroupName>Step<Title><SlotPascal>` where `<Title>` is the step's `title` field (same source that drives `steps/Step<Title>.tsx` today). Examples: `OnboardingStepVerifyLoading`, `OnboardingStepVerifyError`.
 
 Composition inside `page.tsx` — wrap only the step indices that declare variants; leave others unwrapped so identity holds for steps without variants:
 
@@ -1136,11 +1179,11 @@ Composition inside `page.tsx` — wrap only the step indices that declare varian
 // app/onboarding/page.tsx — excerpt, replaces the flat `stepContent` array above
 import { Suspense } from 'react';
 import { ErrorBoundary } from '<import_path>';     // from project_conventions.error_boundary.import_path
-import StepEmail from './_steps/StepEmail';
-import StepVerify from './_steps/StepVerify';
-import StepVerifyLoading from './_steps/StepVerifyLoading';
-import StepVerifyError from './_steps/StepVerifyError';
-import StepProfile from './_steps/StepProfile';
+import StepEmail from './steps/StepEmail';
+import StepVerify from './steps/StepVerify';
+import StepVerifyLoading from './steps/StepVerifyLoading';
+import StepVerifyError from './steps/StepVerifyError';
+import StepProfile from './steps/StepProfile';
 
 // …inside OnboardingStepperBody, replacing the flat array:
 const stepContent = [
@@ -1193,21 +1236,155 @@ The codegen template above satisfies 1–4 by default. Skips are still legal —
 
 ### Verification (Phase 4 and 4b)
 
-- **Phase 4 pixel diff**: drive the stepper via Playwright with a single `page.goto("/onboarding")`, then `click('button:has-text("Next")')` between screenshots. Screenshot only the `[data-stepper-body]` region; mask the shared shell bbox in both the Figma export and the rendered screenshot (`mask_regions[]` in flow-graph). Compare each step's body to the corresponding `stepper_groups[0].steps[i]` Figma frame.
-- **Phase 4b smoke test**: replace the route loop with a stepper driver. Example:
+- **Phase 4a pixel diff**: covered by the unified flow-walker — see §"Flow-walker spec template" below. The walker handles the `page.goto` + click-Next driving and the per-step pixel diff against the Figma export. Per-host screenshot masks the shared shell bbox via `flow-graph.mask_regions[]` so the stepper indicator's variant change between steps doesn't trigger a false diff.
+- **Phase 4b smoke test**: nav-smoke remains a separate spec (`flow-navigation.spec.ts`) for route resolution and click-level edge assertions; see §"Navigation smoke test" below. The walker doesn't replace it — the walker checks visual fidelity, the nav-smoke checks navigation correctness.
+
+For `mode: hybrid`, the walker emits one stepper-style block per group and one route-style block per standalone page, joined in the same spec file.
+
+### Flow-walker spec template
+
+Emitted to `<run-dir>/flow/flow-walker.spec.ts` by `/d2c-build-flow` Phase 4a. Drives the entire flow's loaded path in one Playwright run, screenshots every host, and pixel-diffs against the matching Figma export. The template below is parameterised by `flow-graph.json`; the values inside `<…>` are filled in by Phase 4a's emitter.
 
 ```ts
-test("onboarding stepper advances through all steps", async ({ page }) => {
-  await page.goto("/onboarding");
-  for (let i = 0; i < 3; i++) {
-    await expect(page.getByText(`Step ${i + 1} of 3`)).toBeVisible();
-    if (i < 2) await page.getByRole("button", { name: /next/i }).click();
+import { test, expect, type Page } from "@playwright/test";
+import { execSync } from "node:child_process";
+import path from "node:path";
+
+const RUN_DIR = "<run-dir>";                          // e.g. .claude/d2c/runs/2026-04-19T133000
+const PIXELDIFF = "skills/d2c-build/scripts/pixeldiff.js";
+const THRESHOLD = <threshold>;                        // default 95
+const MASK_REGIONS = path.join(RUN_DIR, "flow/mask-regions.json"); // empty-array file when no masks
+const VIEWPORTS = {
+  desktop: { width: 1280, height: 900 },
+  mobile:  { width: 390,  height: 844 },
+};
+
+async function diffAgainstFigma(
+  page: Page,
+  hostNodeId: string,
+  hostFigmaUrl: string,
+  viewport: keyof typeof VIEWPORTS,
+  label: string
+) {
+  // Live screenshot of the body region.
+  const live = path.join(RUN_DIR, `flow/walker/${hostNodeId}.${viewport}.live.png`);
+  const region = await page.locator("[data-flow-ready], main").first();
+  await region.screenshot({ path: live });
+
+  // Figma export — fetched via MCP tool by the orchestrator before the test runs;
+  // the path is resolved from the run directory's prefetched manifest.
+  const figma = path.join(RUN_DIR, `flow/walker/${hostNodeId}.${viewport}.figma.png`);
+
+  // pixeldiff returns "matched in: <ms>" / "different pixels: <count>" / "error: …".
+  const out = execSync(
+    `node ${PIXELDIFF} --reference ${figma} --candidate ${live} --mask ${MASK_REGIONS} --threshold ${THRESHOLD}`,
+    { encoding: "utf8" }
+  );
+  const score = Number(/score: ([\d.]+)/.exec(out)?.[1] ?? "0");
+  expect(score, `${label} (${viewport}): pixel-diff ${score}% < ${THRESHOLD}%`).toBeGreaterThanOrEqual(
+    THRESHOLD
+  );
+}
+
+// One test() per host. Routes-mode hosts visit a URL; stepper-group virtual pages
+// drive the click-through inside a single test so the same provider state carries
+// across steps.
+
+// --- Routes-mode example ---
+<for each pages[i] where page_type === "page":>
+test("loaded — <route>", async ({ page }) => {
+  for (const viewport of [<viewports>] as const) {
+    await page.setViewportSize(VIEWPORTS[viewport]);
+    await page.goto("<route>");
+    await page.waitForLoadState("domcontentloaded");
+    await Promise.race([
+      page.waitForSelector("[data-flow-ready]", { timeout: 5000 }),
+      page.waitForTimeout(750),
+    ]);
+    await diffAgainstFigma(page, "<node_id>", "<figma_url>", viewport, "<route>");
   }
-  // final step's Next navigates to the post-flow route (or reloads to step 0)
 });
+</for>
+
+// --- Stepper-group example (one test per group, click-through inside) ---
+<for each stepper_groups[g]:>
+test("loaded — <group_route> (<g.steps.length> steps)", async ({ page }) => {
+  for (const viewport of [<viewports>] as const) {
+    await page.setViewportSize(VIEWPORTS[viewport]);
+    await page.goto("<group_route>");
+    await page.waitForLoadState("domcontentloaded");
+
+<for j in 0 .. g.steps.length - 1:>
+    // Step <j+1>: <g.steps[j].title>
+    await page.waitForSelector(`[data-stepper-step="<j>"]`, { timeout: 5000 });
+    await diffAgainstFigma(
+      page,
+      "<g.steps[j].node_id>",
+      "<g.steps[j].figma_url>",
+      viewport,
+      "<group_route>#step-<j+1>"
+    );
+
+  <if j < g.steps.length - 1:>
+    <if g.steps[j].validate === "form":>
+      // Auto-fixture for validate:form — read persisted values first
+      // (user-supplied values from F-FLOW-WALKER-VALIDATION-BLOCKED win),
+      // fall back to the auto-fixture rules in SKILL.md §4a.2 otherwise.
+      <for each state_writes:>
+      // TODO: auto-fixture — replace if a regex/business rule rejects this value
+      {
+        const stepKey = "<g.group_node_id>__step_<j+1>";
+        const fieldName = "<state_writes.name>";
+        const persistedJson = execSync(
+          `node skills/d2c-build-flow/scripts/walker-fixtures.js get ${RUN_DIR} ${stepKey} ${fieldName}`,
+          { encoding: "utf8" }
+        ).trim();
+        const persisted = persistedJson === "null" ? null : JSON.parse(persistedJson);
+        const value = persisted?.value ?? "<auto_value>";
+        await page.getByLabel(/<state_writes_label_regex>/i).fill(String(value));
+        // Persist auto-fixture writes back so reruns can see what was attempted
+        // (user values are protected by the merge helper's user-wins semantics).
+        if (!persisted) {
+          execSync(
+            `node skills/d2c-build-flow/scripts/walker-fixtures.js merge ${RUN_DIR} ${stepKey} ${fieldName} ${JSON.stringify(String(value))} --source auto-fixture --type <state_writes.type>`
+          );
+        }
+      }
+      </for>
+    </if>
+    await page.getByRole("button", { name: /next|continue|submit|finish|done|confirm/i }).click();
+  </if>
+</for>
+  }
+});
+</for>
 ```
 
-For `mode: hybrid`, emit one stepper-style block per group and one route-style block per standalone page, joined in the same spec file.
+**Implementation notes for the emitter:**
+
+- `<viewports>` resolves to `["desktop"]` when the host has no `mobile_variant`, else `["desktop", "mobile"]`.
+- The Figma exports listed at `<run-dir>/flow/walker/<node_id>.<viewport>.figma.png` are fetched **before** the test runs via `mcp__Figma__get_screenshot` (one fetch per host × viewport), then written to the walker directory. The walker only reads them. This keeps the test deterministic — it doesn't depend on MCP availability at test time.
+- The `data-stepper-step="<j>"` attribute is emitted by the orchestrator (see §"Page file" — add it to `<div data-stepper-body data-stepper-step={currentStep}>`). The walker waits for it to advance instead of guessing at a settle delay.
+- Step transitions on `validate: form` steps fill fields BEFORE clicking Next so the auto-fixture data flows through the standard validation pipeline. If the auto-fixture is wrong (Next stays disabled after fill), the next click times out and the walker fires **F-FLOW-WALKER-VALIDATION-BLOCKED** — see `failure-modes.md`.
+- `optional: true` steps where auto-fixture can't satisfy validation get a Skip click instead: `await page.getByRole("button", { name: /skip/i }).click()`.
+- For `mode: hybrid`, route-mode `test()` blocks and stepper-mode `test()` blocks coexist in the same spec file. Order: declared order across `pages[]` and `stepper_groups[]`.
+
+**One-line orchestrator hook to enable the walker** — add `data-stepper-step={currentStep}` to the body region:
+
+```tsx
+<div
+  role="region"
+  aria-labelledby={`stepper-title-${currentStep}`}
+  data-stepper-body
+  data-stepper-step={currentStep}                    // <-- enables walker step-transition wait
+>
+```
+
+For non-stepper pages, add `data-flow-ready` to the outermost element after first paint completes (typically a `useEffect(() => { ref.current?.setAttribute("data-flow-ready", ""); }, [])` on the page-level component). When omitted, the walker falls back to a 750ms settle delay.
+
+### Navigation smoke test
+
+(Existing §"Navigation smoke test" wording continues here — the nav-smoke spec is unchanged by the Phase 4a walker. The two specs are complementary: the walker checks visual fidelity per step; the nav-smoke checks that route resolution and edge wiring don't crash.)
 
 ### Shared-shell interaction
 
@@ -1216,5 +1393,5 @@ When `stepper_groups[i].shell_component_node_id` resolves to a design-system com
 ### Non-negotiables
 
 - The stepper page itself MUST NOT call `router.push` for internal step changes. Use the provider's `next()`/`back()` so state and history stay consistent.
-- Form data persists across step changes — never unmount the provider between steps; `_steps/Step*.tsx` components unmount/mount, but `page.tsx` stays mounted for the life of the flow.
+- Form data persists across step changes — never unmount the provider between steps; `steps/Step*.tsx` components unmount/mount, but `page.tsx` stays mounted for the life of the flow.
 - `reset()` is called automatically after the final step if the last step's Next button has `link_target.edge_kind === "route"` (exit edge), so revisiting the stepper route starts fresh unless persistence is `local`.

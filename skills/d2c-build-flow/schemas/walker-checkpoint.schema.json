@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://d2c.dev/ir/walker-checkpoint.schema.json",
+  "title": "d2c Flow Walker Checkpoint",
+  "description": "Resume artifact for /d2c-build-flow Phase 4a. Mirrors skills/d2c-build/SKILL.md §Phase 4.0a-c (.d2c-build-checkpoint.json). Written atomically (write-tmp + rename) at the end of every walker round so an interrupted flow can resume from where it left off without restarting the entire walker. The flow_graph_hash field anchors this checkpoint to a specific flow-graph.json — a hash mismatch on resume fires F-FLOW-WALKER-CHECKPOINT-STALE (auto-recover; ignore stale checkpoint and start fresh).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "started_at",
+    "flow_graph_hash",
+    "current_host_index",
+    "current_viewport",
+    "current_round",
+    "rounds_completed",
+    "files_touched",
+    "snapshot_dirs_by_host"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Checkpoint artifact schema version. v1 only in MVP."
+    },
+    "started_at": {
+      "type": "string",
+      "description": "ISO 8601 timestamp when this checkpoint was first written. Resume re-uses the same value across saves; only the per-round fields advance."
+    },
+    "flow_graph_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "SHA-256 hex of flow-graph.json content at checkpoint creation time. Mismatch on resume = stale checkpoint (the user re-ran Phase 2a between sessions); fire F-FLOW-WALKER-CHECKPOINT-STALE."
+    },
+    "current_host_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "0-based index into the walker's host iteration order (declared order across pages[] non-overlay non-stepper-group entries followed by stepper_groups[*].steps[*]). On resume, the walker skips hosts already in rounds_completed[] and resumes at this index."
+    },
+    "current_viewport": {
+      "type": "string",
+      "enum": ["desktop", "mobile"],
+      "description": "Which viewport the walker was processing for the current host when the checkpoint was last saved. Mobile only appears when the host has a mobile_variant; otherwise the checkpoint never advances past 'desktop' for that host."
+    },
+    "current_round": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based round counter for the current host/viewport. Advances from 1 to MAX_ROUNDS (default 3). Resume re-runs round N — i.e. the snapshot from round N is the rollback target if the resumed round regresses."
+    },
+    "rounds_completed": {
+      "type": "array",
+      "description": "One entry per (host_node_id, viewport) tuple the walker has finished. Status enum mirrors audit.json: 'pass' (≥THRESHOLD), 'plateau' (≥80% with <1pp improvement), 'plateau-stop' (<80%), 'oscillation' (3-window converged), 'regression' (failed twice with revert), 'max_rounds_exhausted', 'skipped' (Figma export missing).",
+      "items": {
+        "type": "object",
+        "required": ["host_node_id", "viewport", "rounds", "final_score", "status"],
+        "properties": {
+          "host_node_id": {
+            "type": "string",
+            "description": "Figma node id of the host (page or stepper_step)."
+          },
+          "viewport": {
+            "type": "string",
+            "enum": ["desktop", "mobile"]
+          },
+          "rounds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "How many auto-fix rounds were spent on this host/viewport."
+          },
+          "final_score": {
+            "type": ["number", "null"],
+            "description": "Last pixel-diff score (0-100). Null when status is 'skipped'."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "plateau",
+              "plateau-stop",
+              "oscillation",
+              "regression",
+              "max_rounds_exhausted",
+              "skipped"
+            ]
+          },
+          "score_history": {
+            "type": "array",
+            "description": "Per-round scores (oldest first). Used by detectOscillation/detectPlateau on resume so the decision logic stays deterministic across runs.",
+            "items": { "type": "number" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "files_touched": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Absolute paths of every file the walker has edited. Lets a clean-cancel ('start fresh' on resume) restore from snapshots before discarding the checkpoint."
+    },
+    "snapshot_dirs_by_host": {
+      "type": "object",
+      "description": "Map of host_node_id to ordered list of snapshot directories created for that host (one per auto-fix round). Used during regression revert and during checkpoint resume to validate the snapshots still exist on disk.",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": false
+}

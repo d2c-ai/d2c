@@ -58,6 +58,12 @@ const MANIFEST_SCHEMA_PATH = path.join(
   "schemas",
   "flow-manifest.schema.json"
 );
+const LOCK_SCHEMA_PATH = path.join(
+  __dirname,
+  "..",
+  "schemas",
+  "flow-decisions-lock.schema.json"
+);
 
 // ---------- Layer 1: inlined minimal JSON Schema validator ----------
 
@@ -1064,6 +1070,176 @@ function readJson(filePath) {
   return JSON.parse(raw);
 }
 
+function verifyFlowLock(lockPath, graphPath) {
+  // Layer-3 cross-check: lock file matches the current flow-graph.json.
+  // Missing lock → F-FLOW-LOCK-MISSING (caller decides recovery; we report).
+  // Hash mismatch → F-FLOW-LOCK-MISSING (lock derived from a different graph).
+  // Locked-value mismatch → F-FLOW-LOCK-CONFLICT (one error per mismatched key;
+  //   the caller's STOP-AND-ASK lists each so the user sees the full divergence).
+  const errors = [];
+  if (!fs.existsSync(lockPath)) {
+    errors.push(
+      `flow-decisions-lock — file not found at ${lockPath} (F-FLOW-LOCK-MISSING — emit it via write-flow-lock.js)`
+    );
+    return errors;
+  }
+  let lock;
+  try {
+    lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  } catch (e) {
+    errors.push(`flow-decisions-lock — could not parse ${lockPath}: ${e.message}`);
+    return errors;
+  }
+  let lockSchema;
+  try {
+    lockSchema = readJson(LOCK_SCHEMA_PATH);
+  } catch (e) {
+    errors.push(`flow-decisions-lock-schema — could not read ${LOCK_SCHEMA_PATH}: ${e.message}`);
+    return errors;
+  }
+  const structural = validateSchema(lockSchema, lock, "", lockSchema);
+  if (structural.length > 0) {
+    for (const err of structural) errors.push(`flow-decisions-lock — ${err}`);
+    return errors;
+  }
+  let graphRaw;
+  try {
+    graphRaw = fs.readFileSync(graphPath);
+  } catch (e) {
+    errors.push(`flow-decisions-lock — could not read flow-graph at ${graphPath}: ${e.message}`);
+    return errors;
+  }
+  const expectedHash = crypto.createHash("sha256").update(graphRaw).digest("hex");
+  if (lock.flow_graph_hash !== expectedHash) {
+    errors.push(
+      `flow-decisions-lock — flow_graph_hash mismatch (lock has ${lock.flow_graph_hash.slice(0, 12)}…, current graph hashes to ${expectedHash.slice(0, 12)}…) — F-FLOW-LOCK-MISSING; regenerate the lock`
+    );
+    return errors;
+  }
+  let graph;
+  try {
+    graph = JSON.parse(graphRaw.toString("utf8"));
+  } catch (e) {
+    errors.push(`flow-decisions-lock — flow-graph parse failed: ${e.message}`);
+    return errors;
+  }
+  for (const err of crossCheckLockedValues(lock, graph)) {
+    errors.push(`flow-decisions-lock — F-FLOW-LOCK-CONFLICT — ${err}`);
+  }
+  return errors;
+}
+
+function crossCheckLockedValues(lock, graph) {
+  // Verify every status:"locked" entry in the lock matches the current graph.
+  // status:"failed" entries are skipped — those may legitimately differ
+  // pending re-decision.
+  const errors = [];
+  const fd = lock.flow_decisions || {};
+  function check(decisionPath, lockEntry, currentValue) {
+    if (!lockEntry || lockEntry.status !== "locked") return;
+    if (!deepEqual(lockEntry.value, currentValue)) {
+      errors.push(
+        `${decisionPath} — locked=${JSON.stringify(lockEntry.value)} current=${JSON.stringify(currentValue)}`
+      );
+    }
+  }
+  check("flow_decisions.mode", fd.mode, graph.mode);
+  check("flow_decisions.mode_source", fd.mode_source, graph.mode_source ?? "explicit");
+  if (fd.mode_confidence) {
+    check("flow_decisions.mode_confidence", fd.mode_confidence, graph.mode_confidence);
+  }
+  const shellDetectedNow =
+    Array.isArray(graph.layouts) && graph.layouts.length > 0;
+  check("flow_decisions.shell_detected", fd.shell_detected, shellDetectedNow);
+  if (fd.shell_node_id) {
+    check(
+      "flow_decisions.shell_node_id",
+      fd.shell_node_id,
+      graph.layouts?.[0]?.figma_node_id ?? null
+    );
+  }
+  const pc = fd.project_conventions || {};
+  check(
+    "flow_decisions.project_conventions.component_type",
+    pc.component_type,
+    graph.project_conventions?.component_type ?? null
+  );
+  check(
+    "flow_decisions.project_conventions.error_boundary_kind",
+    pc.error_boundary_kind,
+    graph.project_conventions?.error_boundary?.kind ?? null
+  );
+  check(
+    "flow_decisions.project_conventions.data_fetching_kind",
+    pc.data_fetching_kind,
+    graph.project_conventions?.data_fetching?.kind ?? null
+  );
+  const currentGroups = (graph.stepper_groups || []).map((g) => ({
+    name: g.name,
+    route: g.route,
+    validation_enabled: g.validation_enabled ?? false,
+    persistence: g.persistence ?? null,
+  }));
+  check("flow_decisions.stepper_groups", fd.stepper_groups, currentGroups);
+
+  for (const [nodeId, decisions] of Object.entries(lock.page_decisions || {})) {
+    const page = (graph.pages || []).find((p) => p.node_id === nodeId);
+    if (!page) {
+      // Locked page missing from current graph — treat as a conflict so the user
+      // explicitly approves the deletion before downstream phases proceed.
+      errors.push(`page_decisions.${nodeId} — locked page not found in current flow-graph.pages[]`);
+      continue;
+    }
+    if (decisions.route) check(`page_decisions.${nodeId}.route`, decisions.route, page.route ?? null);
+    if (decisions.layout_applied) {
+      const currentLayoutName =
+        page.layout_applied !== undefined && page.layout_applied !== null
+          ? page.layout_applied
+          : (graph.layouts || []).find(
+              (l) => Array.isArray(l.applies_to) && l.applies_to.includes(nodeId)
+            )?.name ?? null;
+      check(`page_decisions.${nodeId}.layout_applied`, decisions.layout_applied, currentLayoutName);
+    }
+    if (decisions.mobile_variant_figma_url) {
+      check(
+        `page_decisions.${nodeId}.mobile_variant_figma_url`,
+        decisions.mobile_variant_figma_url,
+        page.mobile_variant?.figma_url ?? null
+      );
+    }
+  }
+
+  for (const [edgeKey, decisions] of Object.entries(lock.edge_decisions || {})) {
+    const [from, to] = edgeKey.split("__");
+    const edge = (graph.edges || []).find(
+      (e) => e.from_node_id === from && e.to_node_id === to
+    );
+    if (!edge) {
+      errors.push(`edge_decisions.${edgeKey} — locked edge not found in current flow-graph.edges[]`);
+      continue;
+    }
+    if (decisions.source_component_node_id) {
+      check(
+        `edge_decisions.${edgeKey}.source_component_node_id`,
+        decisions.source_component_node_id,
+        edge.source_component_node_id ?? null
+      );
+    }
+    if (decisions.trigger) {
+      check(`edge_decisions.${edgeKey}.trigger`, decisions.trigger, edge.trigger ?? null);
+    }
+    if (decisions.condition_kind) {
+      check(
+        `edge_decisions.${edgeKey}.condition_kind`,
+        decisions.condition_kind,
+        edge.condition?.kind ?? null
+      );
+    }
+  }
+
+  return errors;
+}
+
 function parseArgs(argv) {
   const positional = [];
   const opts = {};
@@ -1082,6 +1258,8 @@ function parseArgs(argv) {
       if (next && !next.startsWith("--")) {
         opts.normalizeOut = argv[++i];
       }
+    } else if (a === "--verify-lock") {
+      opts.verifyLock = argv[++i];
     } else {
       positional.push(a);
     }
@@ -1093,7 +1271,7 @@ function main() {
   const { positional, opts } = parseArgs(process.argv.slice(2));
   if (positional.length !== 1) {
     console.error(
-      "usage: validate-flow-graph.js <flow-graph-path> [--verify-manifest <manifest-path> --tokens <tokens-path>] [--normalize [<out-path>]]"
+      "usage: validate-flow-graph.js <flow-graph-path> [--verify-manifest <manifest-path> --tokens <tokens-path>] [--verify-lock <lock-path>] [--normalize [<out-path>]]"
     );
     process.exit(2);
   }
@@ -1141,7 +1319,8 @@ function main() {
   const manifestErrors = opts.verifyManifest
     ? verifyManifest(opts.verifyManifest, opts.tokens)
     : [];
-  const allErrors = [...structural, ...semantic, ...manifestErrors];
+  const lockErrors = opts.verifyLock ? verifyFlowLock(opts.verifyLock, graphPath) : [];
+  const allErrors = [...structural, ...semantic, ...manifestErrors, ...lockErrors];
 
   const pages = Array.isArray(graph.pages) ? graph.pages.length : 0;
   const edges = Array.isArray(graph.edges) ? graph.edges.length : 0;
@@ -1160,6 +1339,9 @@ function main() {
   if (opts.verifyManifest) {
     console.log(`manifest: ${manifestErrors.length === 0 ? "ok" : "fail"}`);
   }
+  if (opts.verifyLock) {
+    console.log(`lock: ${lockErrors.length === 0 ? "ok" : "fail"}`);
+  }
   console.log(`errors: ${allErrors.length}`);
   for (const err of allErrors) {
     console.log(`error: ${err}`);
@@ -1175,6 +1357,8 @@ module.exports = {
   validateSchema,
   validateSemantic,
   verifyManifest,
+  verifyFlowLock,
+  crossCheckLockedValues,
   computeTokensHash,
   normalizeFlowGraph,
   normalizeStateVariants,

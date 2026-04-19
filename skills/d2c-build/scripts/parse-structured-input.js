@@ -45,6 +45,32 @@
  *                                                      appends the variant's result
  *                                                      entry to that file — flow-level
  *                                                      pixel-diff aggregation.)
+ *   api_calls          — array of {name, schema?}    (default: []; populated by
+ *                                                      /d2c-build-flow Phase 1.5 when the
+ *                                                      user answered Q6 with `yes` and
+ *                                                      described one or more API calls.
+ *                                                      Each entry: {name: string,
+ *                                                      schema?: string|null}.)
+ *   stepper_step       — object | null               (default: null; populated by
+ *                                                      /d2c-build-flow Phase 3 when
+ *                                                      delegating a stepper step body to
+ *                                                      /d2c-build. When set, /d2c-build
+ *                                                      emits a presentational component
+ *                                                      with the standard step prop
+ *                                                      contract { onNext, onBack,
+ *                                                      onValidityChange?, optional?,
+ *                                                      data?, setField? } instead of a
+ *                                                      route page. Required keys:
+ *                                                      step_index (1-based int),
+ *                                                      total_steps (int >= 1),
+ *                                                      validation_required (bool),
+ *                                                      optional (bool). Optional keys:
+ *                                                      next_button_node_id,
+ *                                                      back_button_node_id,
+ *                                                      state_writes[] (mirrors
+ *                                                      flow-graph stepper_step.state_writes).
+ *                                                      The semantic_role MUST be 'loaded'
+ *                                                      when stepper_step is present.)
  */
 
 "use strict";
@@ -89,7 +115,83 @@ const DEFAULTS = {
   trigger: null,
   parent_flow_run: null,
   audit_path: null,
+  api_calls: [],
+  stepper_step: null,
 };
+
+function validateStepperStep(s) {
+  const errors = [];
+  if (s === null || s === undefined) return errors;
+  if (!isPlainObject(s)) {
+    return ["stepper_step — must be an object or null"];
+  }
+  if (
+    typeof s.step_index !== "number" ||
+    !Number.isInteger(s.step_index) ||
+    s.step_index < 1
+  ) {
+    errors.push("stepper_step.step_index — must be a 1-based integer");
+  }
+  if (
+    typeof s.total_steps !== "number" ||
+    !Number.isInteger(s.total_steps) ||
+    s.total_steps < 1
+  ) {
+    errors.push("stepper_step.total_steps — must be a positive integer");
+  }
+  if (
+    Number.isInteger(s.step_index) &&
+    Number.isInteger(s.total_steps) &&
+    s.step_index > s.total_steps
+  ) {
+    errors.push(
+      `stepper_step.step_index (${s.step_index}) — must not exceed total_steps (${s.total_steps})`
+    );
+  }
+  if (typeof s.validation_required !== "boolean") {
+    errors.push("stepper_step.validation_required — must be a boolean");
+  }
+  if (typeof s.optional !== "boolean") {
+    errors.push("stepper_step.optional — must be a boolean");
+  }
+  if (
+    "next_button_node_id" in s &&
+    s.next_button_node_id !== null &&
+    typeof s.next_button_node_id !== "string"
+  ) {
+    errors.push("stepper_step.next_button_node_id — must be a string or null");
+  }
+  if (
+    "back_button_node_id" in s &&
+    s.back_button_node_id !== null &&
+    typeof s.back_button_node_id !== "string"
+  ) {
+    errors.push("stepper_step.back_button_node_id — must be a string or null");
+  }
+  if ("state_writes" in s && s.state_writes !== null && s.state_writes !== undefined) {
+    if (!Array.isArray(s.state_writes)) {
+      errors.push("stepper_step.state_writes — must be an array (or omit)");
+    } else {
+      s.state_writes.forEach((w, i) => {
+        if (!isPlainObject(w)) {
+          errors.push(`stepper_step.state_writes[${i}] — must be an object`);
+          return;
+        }
+        if (typeof w.name !== "string" || !/^[a-z][A-Za-z0-9]*$/.test(w.name)) {
+          errors.push(
+            `stepper_step.state_writes[${i}].name — must be camelCase identifier`
+          );
+        }
+        if (!["string", "number", "boolean"].includes(w.type)) {
+          errors.push(
+            `stepper_step.state_writes[${i}].type — must be one of string, number, boolean`
+          );
+        }
+      });
+    }
+  }
+  return errors;
+}
 
 function isPlainObject(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -290,6 +392,57 @@ function parseStructuredInput(raw) {
     errors.push("trigger — must be a string or null");
   }
 
+  if ("api_calls" in raw && raw.api_calls !== null && raw.api_calls !== undefined) {
+    if (!Array.isArray(raw.api_calls)) {
+      errors.push("api_calls — must be an array (or omit)");
+    } else {
+      raw.api_calls.forEach((entry, i) => {
+        if (!isPlainObject(entry)) {
+          errors.push(`api_calls[${i}] — must be an object`);
+          return;
+        }
+        if (typeof entry.name !== "string" || entry.name.length === 0) {
+          errors.push(`api_calls[${i}].name — must be a non-empty string`);
+        }
+        if (
+          "schema" in entry &&
+          entry.schema !== null &&
+          typeof entry.schema !== "string"
+        ) {
+          errors.push(`api_calls[${i}].schema — must be a string or null when present`);
+        }
+      });
+      if (raw.has_api_calls === "no" && raw.api_calls.length > 0) {
+        errors.push(
+          "api_calls — must be empty when has_api_calls is 'no' (got non-empty array)"
+        );
+      }
+    }
+  }
+
+  if ("stepper_step" in raw) {
+    errors.push(...validateStepperStep(raw.stepper_step));
+    if (
+      raw.stepper_step !== null &&
+      raw.stepper_step !== undefined &&
+      raw.semantic_role !== "loaded"
+    ) {
+      errors.push(
+        `stepper_step — only the 'loaded' slot may carry stepper_step (got semantic_role="${raw.semantic_role}")`
+      );
+    }
+    if (
+      raw.stepper_step !== null &&
+      raw.stepper_step !== undefined &&
+      raw.what !== "component" &&
+      raw.what !== undefined
+    ) {
+      errors.push(
+        `stepper_step — what must be "component" when stepper_step is set (got "${raw.what}")`
+      );
+    }
+  }
+
   if (errors.length > 0) return { ok: false, errors };
 
   // Normalise: apply defaults for optional fields, strip unknown keys beyond
@@ -307,6 +460,28 @@ function parseStructuredInput(raw) {
     trigger: raw.trigger ?? DEFAULTS.trigger,
     parent_flow_run: raw.parent_flow_run ?? DEFAULTS.parent_flow_run,
     audit_path: raw.audit_path ?? DEFAULTS.audit_path,
+    api_calls: Array.isArray(raw.api_calls)
+      ? raw.api_calls.map((entry) => ({
+          name: entry.name,
+          schema: entry.schema ?? null,
+        }))
+      : DEFAULTS.api_calls,
+    stepper_step: isPlainObject(raw.stepper_step)
+      ? {
+          step_index: raw.stepper_step.step_index,
+          total_steps: raw.stepper_step.total_steps,
+          validation_required: raw.stepper_step.validation_required,
+          optional: raw.stepper_step.optional,
+          next_button_node_id: raw.stepper_step.next_button_node_id ?? null,
+          back_button_node_id: raw.stepper_step.back_button_node_id ?? null,
+          state_writes: Array.isArray(raw.stepper_step.state_writes)
+            ? raw.stepper_step.state_writes.map((w) => ({
+                name: w.name,
+                type: w.type,
+              }))
+            : [],
+        }
+      : DEFAULTS.stepper_step,
     project_conventions: {
       component_type: raw.project_conventions.component_type,
       error_boundary: {
