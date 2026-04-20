@@ -82,6 +82,10 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 | F-FLOW-WALKER-OSCILLATION | 4a | stop-and-ask | Last 3 auto-fix scores within 2pp range — loop won't converge |
 | F-FLOW-WALKER-SHARED-BLAST | 4a | stop-and-ask | Auto-fix would edit shared orchestrator/state context affecting other passing steps |
 | F-FLOW-WALKER-CHECKPOINT-STALE | 4a | auto-recover | `walker-checkpoint.json` references a flow-graph hash that no longer matches |
+| F-FLOW-WALKER-DEPS-MISSING | 4a | auto-recover | `pixelmatch`, `pngjs`, or `@playwright/test` not reachable when walker tries to start |
+| F-FLOW-WALKER-AUTH-DETECTED-NO-CREDS | 4a | stop-and-ask | Auth detected + flow has API calls + no `D2C_TEST_USER`/`D2C_TEST_PASSWORD` in `.env.local` |
+| F-FLOW-WALKER-AUTH-BYPASS-INSTRUCTIONS | 4a | inform | Auth detected + UI-only flow — emitted snippet for the user to add gated routes to public list |
+| F-FLOW-WALKER-AUTH-LOGIN-FAILED | 4a | stop-and-ask | Walker tried to log in via the configured credentials but the login flow did not produce a session |
 | F-FLOW-NAV-AUTOFIX-EXHAUSTED | 4b | inform | Nav-test autofix hit `--nav-max-rounds` without a passing diff |
 | F-FLOW-HONOR-COMPONENT-UNAUTHORIZED | 5 | stop-and-ask | Flow-emitted file imports a PascalCase component that isn't in `flow-graph.layouts[]`, `design-tokens.components[]`, or `app/<route>/steps/` |
 | F-FLOW-HONOR-TOKEN-UNAUTHORIZED | 5 | stop-and-ask | Flow-emitted file uses a hardcoded value matching a token in `design-tokens.json` instead of the semantic class |
@@ -156,16 +160,15 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 
 1. Parse the Figma file key from the offending step URL (the path segment after `/design/` or `/file/`).
 2. Call `mcp__figma__get_metadata` with that file key to retrieve the top-level frame list.
-3. Hand the raw response to `skills/d2c-build-flow/scripts/format-frame-picker.js` (or its exported `formatFramePicker({ frames, stepNumber, fileUrl })`).
-   - `kind === "ok"` → print `result.text` verbatim inside the STOP-AND-ASK.
-   - `kind === "empty"` → the file has no top-level FRAMEs. Escalate to `FX-UNKNOWN-FAILURE`; do NOT present an empty pick-list.
+3. Render the response as a numbered pick-list per SKILL.md §"When `F-FLOW-FILE-URL` fires" (Phase 1):
+   - Top-level FRAME nodes only.
+   - When the file has no top-level FRAMEs, escalate to `FX-UNKNOWN-FAILURE` with "Figma file `<url>` has no top-level frames"; do NOT present an empty pick-list.
 4. Accept user input:
-   - `^\d+$` that indexes into `result.frames[]` → rebuild the step line as `Step <N>: <fileUrl>?node-id=<chosen-node-id>` and re-run Phase 1 from the top (parser). `node-id` values are already in colon form per the helper.
+   - `^\d+$` that indexes into the printed pick-list → rebuild the step line as `Step <N>: <fileUrl>?node-id=<chosen-node-id>` and re-run Phase 1 from the top (parser). `node-id` values must be in colon form (`1:234`).
    - `abort` → stop the flow cleanly.
    - Any other input → re-show the prompt unchanged (do NOT improvise).
-5. The helper is a pure function — if the user reports a mismatch between the printed list and the Figma UI, diagnose the underlying `get_metadata` response rather than rewriting the prompt by hand.
 
-**User prompt** (rendered by `formatFramePicker` — shown here for reference only):
+**User prompt template:**
 > "Step {N} points to a Figma file URL, not a specific frame:
 > {url}
 >
@@ -176,7 +179,7 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 >
 > Which frame is step {N}? (number, or `abort`)"
 
-**Context to show:** The Figma file URL the user provided and the `get_metadata` frame list (top-level frames only, `type === "FRAME"`). Nested children and non-FRAME entries (`SECTION`, `GROUP`, `COMPONENT`, etc.) are filtered out by the helper.
+**Context to show:** The Figma file URL the user provided and the `get_metadata` frame list (top-level frames only, `type === "FRAME"`). Nested children and non-FRAME entries (`SECTION`, `GROUP`, `COMPONENT`, etc.) MUST be filtered out — they're not valid frame URLs.
 
 ---
 
@@ -509,13 +512,7 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 - **Phase:** 4a
 - **Tier:** stop-and-ask
 - **Trigger:** A `validate: form` step received auto-fixture data for every wired field but the Next button remained `disabled` (or fired no `onClick` event when clicked). Likely a regex / business-rule constraint the auto-fixture didn't satisfy (e.g. password complexity, age >= 18, regex-narrow phone format).
-- **Action:** Halt. Surface the field values used and the field metadata (regex, min/max, required attributes) and ask the user to supply real fixture values for this step. Persist the user's values to `<run-dir>/flow/walker-fixtures.json` (schema at `skills/d2c-build-flow/schemas/walker-fixtures.schema.json`) via the merge helper so reruns won't re-prompt:
-  ```bash
-  node skills/d2c-build-flow/scripts/walker-fixtures.js merge <run-dir> \
-    <group_node_id>__step_<N> <field-name> "<user-supplied-value>" \
-    --source user --type string|number|boolean
-  ```
-  The merge writer enforces user-wins semantics: an existing `user` entry is never silently overwritten by a later `auto-fixture` write. Subsequent walker runs read the persisted value via `walker-fixtures.js get <run-dir> <step-key> <field>` BEFORE generating an auto-fixture, so this STOP-AND-ASK fires at most once per (step, field) tuple per project lifetime.
+- **Action:** Halt. Surface the field values used and the field metadata (regex, min/max, required attributes) and ask the user to supply real fixture values for this step. Persist the user's values to `<run-dir>/flow/walker-fixtures.json` (schema at `skills/d2c-build-flow/schemas/walker-fixtures.schema.json`) per the read-merge-write protocol in SKILL.md §4a.2: read the file (or treat as `{schema_version: 1, fixtures: {}}` if missing), insert `fixtures[<group_node_id>__step_<N>][<field-name>] = { value: "<user-value>", supplied_by: "user", supplied_at: "<ISO 8601>", field_type: "string|number|boolean" }`, write atomically (`>tmp; mv tmp final`). The user-wins rule in SKILL.md §4a.2 guarantees that subsequent auto-fixture writes can never silently overwrite this entry — so the next walker run reads the persisted value BEFORE generating an auto-fixture, and this STOP-AND-ASK fires at most once per (step, field) tuple per project lifetime.
 - **Max retries:** 0 (one prompt; the persistence layer guarantees no repeat)
 - **Lock impact:** none
 - **Related rule:** SKILL.md §"Phase 4a.2 Auto-fixture for `validate: form` steps". Anti-rationalization: Do NOT reason that "a longer auto-fixture string would probably pass" — the validation pattern is the user's contract; they supply the values.
@@ -577,8 +574,8 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 
 - **Phase:** 4a
 - **Tier:** auto-recover
-- **Trigger:** After applying an auto-fix in round N, the new pixel-diff score is more than `REGRESSION_DELTA` (1.0pp) below the round N-1 score. Detected by `walker-snapshot.js::detectRegression()`. Mirrors `d2c-build/SKILL.md` §Phase 4.4b.
-- **Action:** Revert all files edited in round N from the snapshot at `<run-dir>/flow/walker-snapshots/<host_node_id>/round-<N>/` (via `walker-snapshot.js revert ...`). Then dispatch `/d2c-build` ONE more time with a different fix strategy — pass the previous failed strategy in `fix_target.previous_failed_strategies[]` so the AI doesn't repeat itself. If the alternate fix ALSO regresses, escalate to STOP AND ASK with the round history.
+- **Trigger:** After applying an auto-fix in round N, the new pixel-diff score is more than `REGRESSION_DELTA` (1.0pp) below the round N-1 score. Detected per the in-line rule in SKILL.md §4a.5 step 3. Mirrors `d2c-build/SKILL.md` §Phase 4.4b.
+- **Action:** Revert all files edited in round N from the snapshot at `<run-dir>/flow/walker-snapshots/<host_node_id>/round-<N>/` (reverse `cp` per SKILL.md §4a.5 step 4). Then dispatch `/d2c-build` ONE more time with a different fix strategy — pass the previous failed strategy in `fix_target.previous_failed_strategies[]` so the AI doesn't repeat itself. If the alternate fix ALSO regresses, escalate to STOP AND ASK with the round history.
 - **Max retries:** 1 (one alternate fix attempt; if it also regresses, escalate)
 - **Lock impact:** none (the lock isn't touched; we're rolling back code, not IR)
 - **Related rule:** Non-negotiable #4 (Bucket F enforced on every emitted file). Anti-rationalization: Do NOT silently accept the lower score because "it's only 2pp" — regressions compound across rounds, and the snapshot mechanism exists precisely so we don't compound.
@@ -601,7 +598,7 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 
 - **Phase:** 4a
 - **Tier:** conditional (inform if score ≥ 80%, stop-and-ask if score < 80%)
-- **Trigger:** After round N, the new score improved by less than `PLATEAU_DELTA` (1.0pp) over round N-1. Detected by `walker-snapshot.js::detectPlateau()`. The conditional tier mirrors d2c-build's P4-PLATEAU — at high scores (≥80%) the remaining diff is usually renderer artefacts (anti-aliasing, sub-pixel positioning) and not worth more rounds; at low scores it usually means the auto-fix strategy is wrong and the user should weigh in.
+- **Trigger:** After round N, the new score improved by less than `PLATEAU_DELTA` (1.0pp) over round N-1. Detected per the in-line rule in SKILL.md §4a.5 step 3. The conditional tier mirrors d2c-build's P4-PLATEAU — at high scores (≥80%) the remaining diff is usually renderer artefacts (anti-aliasing, sub-pixel positioning) and not worth more rounds; at low scores it usually means the auto-fix strategy is wrong and the user should weigh in.
 - **Action:** Two branches keyed on the current score. **At score ≥80%** (inform tier): STOP autofixing this (host, viewport); record `{ status: "plateau", final_score: <score>, plateau_reason: "improvement_below_threshold" }` in `audit.json` and push an `audit.json.warnings[]` entry with kind `walker_plateau` so the Phase 6 report surfaces it. **At score <80%** (stop-and-ask tier): Halt; show the score progression and ask the user whether to (a) accept the current score and stop, (b) try a different fix strategy (re-prompt with hints), or (c) re-run Phase 2 for this host.
 - **Max retries:** 0 in either branch
 - **Lock impact:** none for the ≥80% branch; choice (c) in the <80% branch marks the host's lock entries as `failed` so Phase 2 can re-decide.
@@ -622,7 +619,7 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 
 - **Phase:** 4a
 - **Tier:** stop-and-ask
-- **Trigger:** The last `OSCILLATION_WINDOW` (3) auto-fix scores fall within `OSCILLATION_DELTA` (2.0pp) of each other. Detected by `walker-snapshot.js::detectOscillation()`. The auto-fix loop is bouncing between candidate fixes — each round picks a different region to nudge but the overall score doesn't move. Mirrors d2c-build's plateau-with-oscillation case.
+- **Trigger:** The last `OSCILLATION_WINDOW` (3) auto-fix scores fall within `OSCILLATION_DELTA` (2.0pp) of each other. Detected per the in-line rule in SKILL.md §4a.5 step 3. The auto-fix loop is bouncing between candidate fixes — each round picks a different region to nudge but the overall score doesn't move. Mirrors d2c-build's plateau-with-oscillation case.
 - **Action:** Halt. Show the 3-round score history and the diff regions for each round. Ask the user whether to (a) accept the current score and stop, (b) provide a fix hint (will be passed to `/d2c-build` in the next dispatch), or (c) re-run Phase 2 for this host.
 - **Max retries:** 0
 - **Lock impact:** Choice (c) marks the host's lock entries as `failed`.
@@ -659,14 +656,101 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 
 - **Phase:** 4a (entry / resume check)
 - **Tier:** auto-recover
-- **Trigger:** `walker-checkpoint.json` exists at `<run-dir>/flow/walker-checkpoint.json`, but its `flow_graph_hash` field doesn't match the SHA-256 of the current `flow-graph.json` content. Detected by `walker-checkpoint.js status <run-dir>` returning `state: "stale"`. Triggered when the user re-ran Phase 2a between sessions and the rerun produced a different IR.
-- **Action:** Delete the stale checkpoint via `walker-checkpoint.js delete <run-dir>` and proceed as if no checkpoint existed (start the walker fresh from host index 0). Log a one-line warning so the user knows the previous walker progress was discarded; do not prompt — this is a recoverable bookkeeping miss, not a divergence the user needs to weigh in on.
+- **Trigger:** `walker-checkpoint.json` exists at `<run-dir>/flow/walker-checkpoint.json`, but its `flow_graph_hash` field doesn't match the SHA-256 of the current `flow-graph.json` content (compare via `shasum -a 256`). Detected by the `STATE=stale` path in SKILL.md §4a.0c. Triggered when the user re-ran Phase 2a between sessions and the rerun produced a different IR — OR when the checkpoint file is corrupted/unparseable.
+- **Action:** `rm <run-dir>/flow/walker-checkpoint.json` and proceed as if no checkpoint existed (start the walker fresh from host index 0). Log a one-line warning so the user knows the previous walker progress was discarded; do not prompt — this is a recoverable bookkeeping miss, not a divergence the user needs to weigh in on.
 - **Max retries:** N/A (delete + start fresh always succeeds)
 - **Lock impact:** none (this failure is about checkpoint freshness, not lock-decision drift; `flow-decisions-lock.json` has its own F-FLOW-LOCK-MISSING for an analogous case).
 - **Related rule:** Non-negotiable #1 (Single source of truth — `flow-graph.json` is authoritative; the checkpoint follows it, not the other way around).
 
 **Log line:**
 > "Discarding stale walker-checkpoint.json (flow_graph_hash mismatch: checkpoint {old_hash}, current {new_hash}). Starting walker fresh."
+
+---
+
+### F-FLOW-WALKER-DEPS-MISSING — Walker dependencies not reachable
+
+- **Phase:** 4a (Phase 4a.0 pre-flight)
+- **Tier:** auto-recover
+- **Trigger:** One or more of the three Phase 4a.0a `node -e "require('...')"` checks (pixelmatch, pngjs, @playwright/test) exited non-zero. Mirrors d2c-build's P4-PIXELDIFF-DEPS but bundles all three deps in one check so Phase 4a.0 makes a single decision instead of three sequential ones.
+- **Action:** Run the install pass from SKILL.md §4a.0a once: `npm install -g pixelmatch pngjs && npm install -D @playwright/test`. Re-run all three checks; if anything is still missing, escalate to **PX-RETRY-EXHAUSTION** with the install error in the prompt.
+- **Max retries:** 1 (one install attempt, then escalate)
+- **Lock impact:** none
+- **Related rule:** Non-negotiable #1 (Design tokens MUST be loaded — by extension, every tool the walker needs MUST be reachable before Phase 4a starts).
+
+**Log line:**
+> "Walker preflight failed: missing [{deps}]. Running `npm install -g pixelmatch pngjs && npm install -D @playwright/test`. Re-checking…"
+
+---
+
+### F-FLOW-WALKER-AUTH-DETECTED-NO-CREDS — Auth present but no test credentials
+
+- **Phase:** 4a (Phase 4a.0 auth pre-flight)
+- **Tier:** stop-and-ask
+- **Trigger:** Phase 4a.0b auth detection (SKILL.md) found a system AND at least one flow route is gated AND the flow has `flow_intake.has_api_calls === "yes"` (so a public-route bypass would mask real auth-gated API behaviour) AND `process.env.D2C_TEST_USER` / `process.env.D2C_TEST_PASSWORD` are unset (the walker reads them from `.env.local` at runtime).
+- **Action:** Halt. Show the detected auth system, the gated routes from `flow-graph.pages[].route ∩ protected_routes`, and ask the user to add credentials to `.env.local`. Show the exact two lines the user needs to paste. After the user confirms the env vars are set, re-run the walker.
+- **Max retries:** 0
+- **Lock impact:** none
+- **Related rule:** Non-negotiable #1 (Design tokens MUST be loaded — by extension, every credential the walker needs MUST be reachable before Phase 4a runs).
+
+**User prompt:**
+> "Detected `{system}` auth in this project. The following flow routes are protected and need a logged-in session for the walker to pixel-diff:
+> - {route_1}
+> - {route_2}
+> ...
+>
+> Because the flow declared API calls (Phase 1.5 Q6 = yes), the walker needs a real authenticated session — a public-route bypass would skip the API integration. Please add test credentials to `.env.local`:
+> ```
+> D2C_TEST_USER=<your test user email>
+> D2C_TEST_PASSWORD=<your test user password>
+> ```
+> The walker will read both env vars and use them in a `loginBefore()` Playwright fixture. `.env.local` is gitignored by Next.js convention so credentials don't ship.
+>
+> Press Enter once `.env.local` is updated, or type `abort` to stop."
+
+> Anti-rationalization: Do NOT skip the auth-gated pages because they're "harder to test." Gated pages are usually the most important pages in the flow (dashboards, account settings) — bypassing them silently means the walker reports a green pixel-diff on pages it never actually rendered. Halt until creds exist.
+
+---
+
+### F-FLOW-WALKER-AUTH-BYPASS-INSTRUCTIONS — Auth present, UI-only flow — emit bypass snippet
+
+- **Phase:** 4a (Phase 4a.0 auth pre-flight)
+- **Tier:** inform
+- **Trigger:** Phase 4a.0b auth detection (SKILL.md) found a system AND at least one flow route is gated AND the flow has `flow_intake.has_api_calls === "no"` (UI-only — no real API integration to exercise). Adding gated routes to a public-routes bypass is safe because there's no auth-protected business logic to skip.
+- **Action:** Generate `<run-dir>/flow/walker-auth-bypass.md` containing a per-system snippet the user pastes into their auth config (next-auth → `auth.config.ts` `pages.signIn` / `callbacks.authorized`; clerk → `middleware.ts` `publicRoutes: [...]`; supabase → middleware skip-list; bare middleware → matcher exclusion). Log an inform-level notice with the file path. Pause the walker once for the user to confirm they've applied the snippet (no STOP-AND-ASK prompt — just a `Press Enter to continue` blocker).
+- **Max retries:** N/A (the snippet emit is one-shot; the walker waits for user confirmation).
+- **Lock impact:** none
+- **Related rule:** Non-negotiable #1.
+
+**Log line:**
+> "Auth detected (`{system}`) but flow is UI-only — wrote bypass snippet to `<run-dir>/flow/walker-auth-bypass.md`. Apply the snippet, then press Enter to continue. The bypass is meant to be temporary; revert it before shipping."
+
+> Anti-rationalization: Do NOT auto-edit the user's `auth.config.ts` / `middleware.ts`. Those files are security boundaries. The user gets to decide when and how to apply the bypass.
+
+---
+
+### F-FLOW-WALKER-AUTH-LOGIN-FAILED — Walker login attempt did not produce a session
+
+- **Phase:** 4a (during walker run, in the `loginBefore()` fixture)
+- **Tier:** stop-and-ask
+- **Trigger:** The walker's `loginBefore()` Playwright fixture submitted the login form with `D2C_TEST_USER` / `D2C_TEST_PASSWORD` but did not see one of: a redirect away from the login URL, a `data-authenticated` attribute on `<body>`, or a session cookie matching the detected system's cookie name (`next-auth.session-token` for next-auth, `__session` for Clerk, `sb-access-token` for Supabase). Likely causes: wrong creds, MFA blocking the login, or a custom login form selector the walker didn't match.
+- **Action:** Halt. Surface the rendered HTML at the moment of failure (last 500 chars), the URL the walker was on, and the error message Playwright reported. Ask the user to either (a) update `.env.local` with corrected credentials, (b) supply a custom selector for the login form (will be persisted in `<run-dir>/flow/walker-auth-config.json`), or (c) abort.
+- **Max retries:** 0
+- **Lock impact:** none
+- **Related rule:** Non-negotiable #1.
+
+**User prompt:**
+> "Walker login attempt failed for `{user}` against `{login_url}`:
+>   {error_message}
+>
+> Last URL: {final_url}
+> Rendered (truncated): {html_snippet}
+>
+> Options:
+> (a) The credentials are wrong — update `D2C_TEST_USER` / `D2C_TEST_PASSWORD` in `.env.local`, then press Enter.
+> (b) The login form uses non-standard selectors — paste the email field selector, password selector, and submit selector. They'll be saved to `<run-dir>/flow/walker-auth-config.json` so reruns won't re-prompt.
+> (c) Abort the walker — I'll fix the login flow manually."
+
+> Anti-rationalization: Do NOT proceed with the walker assuming "the screenshots will be good enough" — every gated host will silently render a login redirect, the pixel-diff will fail across the board, and the user wastes a full walker run debugging visual regressions that are actually auth failures.
 
 ---
 
@@ -769,7 +853,7 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 
 - **Phase:** 4b
 - **Tier:** inform
-- **Trigger:** `nav-autofix-plan.js` returned `action: "escalate"` because every candidate has been tried and the nav test still fails.
+- **Trigger:** The Phase 4b autofix loop (SKILL.md §Phase 4b "Outcome handling") exhausted every priority strategy (`relax-link-target`, `wire-next-best`, `force-click`, `wait-for-state`) and the nav test still fails.
 - **Action:** Report the full planner trail (per-round action + candidate + outcome). Do NOT silently retry — the next rerun starts from round 0.
 - **Max retries:** 0 after exhaustion; caller may re-invoke with a higher `--nav-max-rounds`.
 - **Lock impact:** none
@@ -782,13 +866,13 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 
 ## Phase 5 — Bucket F Honor Checks (flow-emitted files)
 
-These five entries cover violations surfaced by `validate-honor-flow.js` — the per-bucket Bucket F enforcement that runs in Phase 5 against files the flow emits directly (orchestrator `page.tsx`, state context, shared layout, navigation smoke spec, flow-walker spec). The per-step body files emitted by `/d2c-build` dispatches get their own Bucket F coverage from `validate-honor.js`; this phase covers the orchestration-layer files that `/d2c-build` never sees.
+These five entries cover violations surfaced by SKILL.md §5b's Bucket F-Flow enforcement — the per-bucket honor checks that run in Phase 5 against files the flow emits directly (orchestrator `page.tsx`, state context, shared layout, navigation smoke spec, flow-walker spec). The per-step body files emitted by `/d2c-build` dispatches get their own Bucket F coverage from `/d2c-build` Phase 5; this phase covers the orchestration-layer files that `/d2c-build` never sees.
 
 ### F-FLOW-HONOR-COMPONENT-UNAUTHORIZED — Flow-emitted file imports an unknown component
 
 - **Phase:** 5
 - **Tier:** stop-and-ask
-- **Trigger:** `validate-honor-flow.js` reported one or more `violation: F1-Flow` lines. The orchestrator (or another flow-emitted file) imports a PascalCase component whose resolved path is not in `flow-graph.layouts[].component_id` (shared shell), `design-tokens.components[]` (project component reuse), or `app/<route>/steps/Step<N>.tsx` (delegated step body).
+- **Trigger:** SKILL.md §5b's F1-Flow check found one or more violations. The orchestrator (or another flow-emitted file) imports a PascalCase component whose resolved path is not in `flow-graph.layouts[].component_id` (shared shell), `design-tokens.components[]` (project component reuse), or `app/<route>/steps/Step<N>.tsx` (delegated step body).
 - **Action:** Halt. List every unauthorized import with file:line and the resolved path. Ask the user to either (a) replace the rogue import with an authorized one (existing layout, existing component, or a new step), (b) add the component to `design-tokens.components[]` if it's a real new piece of project UI, or (c) abort and let the user re-check the flow's layout decisions.
 - **Max retries:** 0
 - **Lock impact:** none (Bucket F doesn't touch the lock; it just reports that codegen drifted from the IR's authorized-component set).
@@ -811,7 +895,7 @@ These five entries cover violations surfaced by `validate-honor-flow.js` — the
 
 - **Phase:** 5
 - **Tier:** stop-and-ask
-- **Trigger:** `validate-honor-flow.js` reported one or more `violation: F2-Flow` lines. A flow-emitted file uses a hardcoded value (e.g. `bg-[#3366ff]`) that matches a token already in `design-tokens.json` (e.g. `colors.primary === "#3366ff"`).
+- **Trigger:** SKILL.md §5b's F2-Flow check found one or more violations. A flow-emitted file uses a hardcoded value (e.g. `bg-[#3366ff]`) that matches a token already in `design-tokens.json` (e.g. `colors.primary === "#3366ff"`).
 - **Action:** Halt. List every hardcoded value with file:line and the matching token path. Ask the user to either (a) replace each hardcoded value with the semantic class (e.g. `bg-primary`), or (b) confirm the deviation is intentional (rare; usually only for SVG library boundaries — see `framework-react.md` §"Library boundary values").
 - **Max retries:** 0
 - **Lock impact:** none.
@@ -832,7 +916,7 @@ These five entries cover violations surfaced by `validate-honor-flow.js` — the
 
 - **Phase:** 5
 - **Tier:** stop-and-ask
-- **Trigger:** `validate-honor-flow.js` reported one or more `violation: F3-Flow` lines. The orchestrator is missing a step import, the step JSX is missing `onNext` / `onBack` props, the orchestrator never wires `onValidityChange` for a `validation_enabled` group, or the state context is missing one of `next` / `back` / `goTo` / `data` / `setField` / `markStepValid`. Contract is documented at `framework-react-next.md` §"Step component prop contract".
+- **Trigger:** SKILL.md §5b's F3-Flow check found one or more violations. The orchestrator is missing a step import, the step JSX is missing `onNext` / `onBack` props, the orchestrator never wires `onValidityChange` for a `validation_enabled` group, or the state context is missing one of `next` / `back` / `goTo` / `data` / `setField` / `markStepValid`. Contract is documented at `framework-react-next.md` §"Step component prop contract".
 - **Action:** Halt. List every contract violation with the file path and the missing piece. Ask the user to either (a) regenerate the orchestrator and state context (the framework reference template is the source of truth), or (b) explicitly waive the contract for a specific step (rare; usually only for steps that have no Next button by design — see **P3-STEPPER-NEXT-MISSING** option (b)).
 - **Max retries:** 0
 - **Lock impact:** none.
@@ -853,7 +937,7 @@ These five entries cover violations surfaced by `validate-honor-flow.js` — the
 
 - **Phase:** 5
 - **Tier:** inform
-- **Trigger:** `validate-honor-flow.js` reported one or more `violation: F4-Flow` lines. The navigation smoke spec doesn't include an assertion for a route from `flow-graph.edges[]`. The walker (Phase 4a) covers visual fidelity; the nav-smoke spec covers route resolution and edge wiring — a missing edge means a navigation regression could ship undetected.
+- **Trigger:** SKILL.md §5b's F4-Flow check found one or more violations. The navigation smoke spec doesn't include an assertion for a route from `flow-graph.edges[]`. The walker (Phase 4a) covers visual fidelity; the nav-smoke spec covers route resolution and edge wiring — a missing edge means a navigation regression could ship undetected.
 - **Action:** Log a warning per missing edge. Add a TODO to the spec at the appropriate location (the `tests/flow/<flow_name>-navigation.spec.ts` body, after the existing assertions). Continue. The user sees the warning in the Phase 6 report.
 - **Max retries:** N/A (auto-add TODO is silent; the warning is informational).
 - **Lock impact:** none.
@@ -868,7 +952,7 @@ These five entries cover violations surfaced by `validate-honor-flow.js` — the
 
 - **Phase:** 5
 - **Tier:** inform
-- **Trigger:** `validate-honor-flow.js` reported one or more `violation: F5-Flow` lines. The flow-walker spec doesn't include a screenshot+diff for a host (page or stepper-step loaded slot) at every required viewport (desktop + mobile when `mobile_variant` is set).
+- **Trigger:** SKILL.md §5b's F5-Flow check found one or more violations. The flow-walker spec doesn't include a screenshot+diff for a host (page or stepper-step loaded slot) at every required viewport (desktop + mobile when `mobile_variant` is set).
 - **Action:** Log a warning per missing host. Add a TODO at the appropriate location in the walker spec (`<run-dir>/flow/flow-walker.spec.ts`). Continue. The user sees the warning in the Phase 6 report.
 - **Max retries:** N/A.
 - **Lock impact:** none.

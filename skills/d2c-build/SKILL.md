@@ -962,6 +962,75 @@ At the END of each verification round (after scoring in 4.2), save checkpoint st
 
 Write the checkpoint file atomically (write to a temp file, then rename). This ensures a crash mid-write does not corrupt the checkpoint.
 
+### 4.0d — Auth detection + handling
+
+Before the first screenshot, scan the project for an auth system. If the component's route is gated by login, every Phase 4 screenshot will silently render the login page instead of the actual component, every pixel-diff will fail, and the auto-fix loop will spend its budget chasing visual regressions that are actually auth redirects.
+
+**Detection** — run these checks in order; first match wins. Each maps to a `system` value:
+
+1. **`next-auth`** — `package.json` `dependencies["next-auth"]` exists, OR `app/api/auth/[...nextauth]/route.ts` exists, OR `auth.ts` / `auth.config.ts` exists at the project root or under `src/`.
+2. **`clerk`** — `package.json` `dependencies["@clerk/nextjs"]` exists, OR `<ClerkProvider>` appears in `app/layout.tsx` (or `src/app/layout.tsx`).
+3. **`supabase`** — any `package.json` dependency matches `^@supabase/auth-helpers-`, OR both `@supabase/ssr` AND `@supabase/supabase-js` are present.
+4. **`middleware`** — `middleware.ts` (or `src/middleware.ts`, `.js` variants) exists.
+5. **`none`** — none of the above. Skip the rest of this section; Phase 4.1 uses the bare `npx playwright screenshot` CLI.
+
+Use Bash + Read + Glob to evaluate each rule. Example for the next-auth check:
+```bash
+[ -f package.json ] && node -e "const p = require('./package.json'); process.exit(p.dependencies?.['next-auth'] ? 0 : 1)" \
+  || ls app/api/auth/\[...nextauth\]/route.* 2>/dev/null \
+  || ls auth.ts auth.config.ts src/auth.ts src/auth.config.ts 2>/dev/null
+```
+
+When precedence resolves to `next-auth` / `clerk` / `supabase`, ALSO check `middleware.ts` for a `matcher` config — its parsed matchers feed the route-gated check below.
+
+**Parsing middleware matchers** — when `middleware.ts` exists, extract its matcher list with a regex (look for `matcher\s*:\s*(\[…\]|['"`].+?['"`])`):
+- Array: `matcher: ['/dashboard/:path*', '/admin/:path*']` — collect each quoted string.
+- Single: `matcher: '/dashboard/:path*'` — collect the one string.
+
+**Route-gated check** — for the component's route (derived from `output_path` — e.g. `app/dashboard/page.tsx` → `/dashboard`):
+- `route_gated = true` when the route falls under any parsed matcher (treat `:path*` as `(/.*)?`; bare regex form `/(?!api|_next).*/` passes through as a regex).
+- `route_gated = true` when `system !== "none"` AND no matchers parsed (Clerk via `<ClerkProvider>` without a route list — better safe than silently broken).
+- `route_gated = false` when `system === "none"`.
+
+**Login URL guess** — pick the first existing path:
+- `clerk` → `/sign-in` (default).
+- `next-auth` → `/api/auth/signin`.
+- Others → check `app/login/page.tsx`, `app/sign-in/page.tsx`, `app/auth/login/page.tsx` (and `src/app/...` variants); fall back to `null`.
+
+**Default sign-in form selectors** (override per project via `$D2C_TMP/auth-config.json` if the login form is non-standard):
+- email: `input[type='email'], input[name='email'], input[id='email']`
+- password: `input[type='password'], input[name='password'], input[id='password']`
+- submit: `button[type='submit'], button:has-text('Sign in'), button:has-text('Log in')`
+
+**Decision tree:**
+
+1. **`system === "none"` or `route_gated === false`** → no-op. Proceed to Phase 4.1 with the existing `npx playwright screenshot` CLI.
+2. **Auth detected AND `has_api_calls === "no"`** → emit a public-route bypass snippet. Fire **P4-AUTH-BYPASS-INSTRUCTIONS** (inform). The snippet is system-specific:
+   - **next-auth:** `auth.config.ts` `callbacks.authorized` exclusion for the route.
+   - **clerk:** `middleware.ts` `publicRoutes: [...]` array entry.
+   - **supabase / middleware:** `middleware.ts` matcher exclusion.
+   
+   Write the snippet to `$D2C_TMP/auth-bypass.md` and pause for user confirmation (`Press Enter once applied`). Do NOT auto-edit the user's auth config — those files are security boundaries.
+3. **Auth detected AND `has_api_calls === "yes"`** → require real login. Check for `D2C_TEST_USER` and `D2C_TEST_PASSWORD` in the project's `.env.local`:
+   - **Both env vars present** → run `phase4-login.js` to produce `$D2C_TMP/auth-state.json` (Playwright `storageState` JSON). Phase 4.1 will load it into every screenshot context.
+   - **Either env var missing** → fire **P4-AUTH-DETECTED-NO-CREDS** (stop-and-ask). Show the gated route, ask the user to add the env vars to `.env.local`, then re-run.
+
+**Login script invocation** (path 3 only):
+
+```bash
+node skills/d2c-build/scripts/phase4-login.js \
+  --base-url <dev-server-url> \
+  --login-url <login_url from detector> \
+  --system <system from detector> \
+  --out $D2C_TMP/auth-state.json
+```
+
+Reads creds from `process.env` (the caller is expected to source `.env.local` first, e.g. `set -a && source .env.local && set +a`). Exit 0 means a valid `storageState` was written; exit 1 fires **P4-AUTH-LOGIN-FAILED** (stop-and-ask) with the rendered HTML at failure time so the user can debug selectors / MFA / wrong creds. Exit 2 means CLI misuse (or `playwright` npm package not installed).
+
+When this section produces `$D2C_TMP/auth-state.json`, every subsequent Phase 4 screenshot uses `screenshot-with-auth.js` (next section) instead of the bare `npx playwright screenshot` CLI.
+
+<!-- fm:P4-AUTH-DETECTED-NO-CREDS, P4-AUTH-BYPASS-INSTRUCTIONS, P4-AUTH-LOGIN-FAILED -->
+
 ### 4.1 — Take a Screenshot
 Use the Playwright CLI (globally installed) via Bash to capture screenshots:
 
@@ -972,6 +1041,21 @@ npx playwright screenshot --viewport-size="1280,800" --timeout=10000 <dev-server
 1. Run the command with the dev server URL and the primary viewport width.
 2. If multiple viewports, run additional commands at each viewport width (e.g., `--viewport-size="768,1024"` for tablet, `--viewport-size="375,812"` for mobile).
 3. Read the resulting screenshot file(s) to load them into context for comparison.
+
+**Branch on auth-state presence.** When `$D2C_TMP/auth-state.json` exists (produced by Phase 4.0d path 3), the bare `npx playwright screenshot` CLI cannot load it — that CLI doesn't accept `storageState`. Use the auth-aware helper instead:
+
+```bash
+node skills/d2c-build/scripts/screenshot-with-auth.js \
+  --url <dev-server-url> \
+  --output $D2C_TMP/d2c-screenshot.png \
+  --viewport 1280x800 \
+  --auth-state $D2C_TMP/auth-state.json \
+  --timeout 10000
+```
+
+The helper uses the Playwright Node API (`chromium.launch()` → `newContext({ storageState })` → `page.screenshot()`) so the captured page is the authenticated component, not the login redirect. CLI surface mirrors the bare `playwright screenshot` so the only branch in Phase 4.1 is which executable to invoke. Exit 0 = screenshot written; exit 1 = Playwright error (page didn't load, selector timeout); exit 2 = CLI misuse or `playwright` not installed.
+
+When `$D2C_TMP/auth-state.json` is absent (no auth detected, OR path 2 bypass applied), Phase 4.1 keeps using the bare CLI — no behavioural change for the 80% of builds that don't touch auth.
 
 <!-- fm:P4-DEV-SERVER -->
 

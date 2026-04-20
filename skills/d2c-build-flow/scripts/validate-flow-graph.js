@@ -875,7 +875,7 @@ function validateSemantic(graph) {
     }
     if (!graph.project_conventions) {
       errors.push(
-        "project_conventions — required when any host declares state_variants (populated by detect-project-conventions.js in Phase 2a)"
+        "project_conventions — required when any host declares state_variants (populated by Phase 2a step 6b's convention-detection prose in SKILL.md)"
       );
     }
   } else if (graph.project_conventions) {

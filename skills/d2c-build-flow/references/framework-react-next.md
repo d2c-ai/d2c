@@ -1330,24 +1330,37 @@ test("loaded — <group_route> (<g.steps.length> steps)", async ({ page }) => {
       // Auto-fixture for validate:form — read persisted values first
       // (user-supplied values from F-FLOW-WALKER-VALIDATION-BLOCKED win),
       // fall back to the auto-fixture rules in SKILL.md §4a.2 otherwise.
+      // The walker reads/writes <run-dir>/flow/walker-fixtures.json directly via
+      // fs (schema at skills/d2c-build-flow/schemas/walker-fixtures.schema.json).
       <for each state_writes:>
       // TODO: auto-fixture — replace if a regex/business rule rejects this value
       {
+        const fixturesPath = `${RUN_DIR}/flow/walker-fixtures.json`;
         const stepKey = "<g.group_node_id>__step_<j+1>";
         const fieldName = "<state_writes.name>";
-        const persistedJson = execSync(
-          `node skills/d2c-build-flow/scripts/walker-fixtures.js get ${RUN_DIR} ${stepKey} ${fieldName}`,
-          { encoding: "utf8" }
-        ).trim();
-        const persisted = persistedJson === "null" ? null : JSON.parse(persistedJson);
+        let fixtures;
+        try {
+          fixtures = JSON.parse(require("fs").readFileSync(fixturesPath, "utf8"));
+        } catch {
+          fixtures = { schema_version: 1, fixtures: {} };
+        }
+        const persisted = fixtures.fixtures[stepKey]?.[fieldName] ?? null;
         const value = persisted?.value ?? "<auto_value>";
         await page.getByLabel(/<state_writes_label_regex>/i).fill(String(value));
-        // Persist auto-fixture writes back so reruns can see what was attempted
-        // (user values are protected by the merge helper's user-wins semantics).
-        if (!persisted) {
-          execSync(
-            `node skills/d2c-build-flow/scripts/walker-fixtures.js merge ${RUN_DIR} ${stepKey} ${fieldName} ${JSON.stringify(String(value))} --source auto-fixture --type <state_writes.type>`
-          );
+        // Persist auto-fixture writes back so reruns can see what was attempted.
+        // User-wins rule: never silently downgrade `supplied_by: "user"` to "auto-fixture".
+        if (!persisted || persisted.supplied_by !== "user") {
+          fixtures.fixtures[stepKey] ??= {};
+          fixtures.fixtures[stepKey][fieldName] = {
+            value: String(value),
+            supplied_by: "auto-fixture",
+            supplied_at: new Date().toISOString(),
+            field_type: "<state_writes.type>",
+          };
+          // Atomic write: tmp + rename.
+          const tmp = `${fixturesPath}.tmp.${process.pid}.${Date.now()}`;
+          require("fs").writeFileSync(tmp, JSON.stringify(fixtures, null, 2));
+          require("fs").renameSync(tmp, fixturesPath);
         }
       }
       </for>
