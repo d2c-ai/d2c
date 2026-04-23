@@ -6,9 +6,10 @@
  * captured screenshot is the authenticated host (not the login redirect).
  *
  * Used by d2c-build Phase 4.1 when an `auth-state.json` exists at
- * `$D2C_TMP/auth-state.json` (produced by `phase4-login.js`). When no
- * auth state is needed, Phase 4.1 keeps using the existing `npx playwright
- * screenshot` CLI — this helper is opt-in via the `--auth-state` flag.
+ * `$D2C_TMP/auth-state.json` (produced by `phase4-login.js` in Phase 3.5d).
+ * When no auth state is needed, Phase 4.1 keeps using the existing
+ * `npx playwright screenshot` CLI — this helper is opt-in via the
+ * `--auth-state` flag.
  *
  * Usage:
  *   node screenshot-with-auth.js \

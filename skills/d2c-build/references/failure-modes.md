@@ -72,9 +72,9 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 | P4-DEV-SERVER | 4 | stop-and-ask | Dev server not running or unreachable |
 | P4-PLAYWRIGHT-CRASH | 4 | auto-recover | Playwright error (non-connection) |
 | P4-PIXELDIFF-MISSING | 4 | inform | pixeldiff.js not found |
-| P4-AUTH-DETECTED-NO-CREDS | 4 | stop-and-ask | Auth detected on the component's route + has_api_calls=yes + `D2C_TEST_USER`/`D2C_TEST_PASSWORD` missing from `.env.local` |
-| P4-AUTH-BYPASS-INSTRUCTIONS | 4 | inform | Auth detected + UI-only build — emitted snippet for the user to add the route to public list |
-| P4-AUTH-LOGIN-FAILED | 4 | stop-and-ask | `phase4-login.js` ran but the submit didn't produce a session (no redirect, no session cookie) |
+| P4-AUTH-DETECTED-NO-CREDS | 3.5 | stop-and-ask | Auth detected on the component's route + has_api_calls=yes + `D2C_TEST_USER`/`D2C_TEST_PASSWORD` missing from `.env.local` (ID keeps the `P4-` prefix for backward compat; phase owner is 3.5d) |
+| P4-AUTH-BYPASS-INSTRUCTIONS | 3.5 | inform | Auth detected + UI-only build — emitted snippet for the user to add the route to public list |
+| P4-AUTH-LOGIN-FAILED | 3.5 | stop-and-ask | `phase4-login.js` ran but the submit didn't produce a session (no redirect, no session cookie) |
 | P4-PIXELDIFF-DEPS | 4 | auto-recover | pixelmatch or pngjs not installed |
 | P4-FIGMA-SCREENSHOT-UNSAVEABLE | 4 | inform | Figma screenshot cannot be saved to disk for pixeldiff |
 | P4-PLATEAU | 4 | conditional | Score plateau (< 1pp improvement) |
@@ -648,9 +648,9 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 
 ### P4-AUTH-DETECTED-NO-CREDS — Auth gates the route but no test credentials
 
-- **Phase:** 4 (Phase 4.0d auth pre-flight)
+- **Phase:** 3.5 (§3.5d auth pre-flight)
 - **Tier:** stop-and-ask
-- **Trigger:** Phase 4.0d auth detection (SKILL.md) determined the component's route is gated by login AND the build's intake answer for Q6 was `has_api_calls: "yes"` (so a public-route bypass would mask real auth-gated API behaviour) AND `process.env.D2C_TEST_USER` / `process.env.D2C_TEST_PASSWORD` are unset.
+- **Trigger:** Phase 3.5d auth detection (SKILL.md) determined the component's route is gated by login AND the build's intake answer for Q6 was `has_api_calls: "yes"` (so a public-route bypass would mask real auth-gated API behaviour) AND `process.env.D2C_TEST_USER` / `process.env.D2C_TEST_PASSWORD` are unset.
 - **Action:** Halt. Show the detected auth system, the gated route, and ask the user to add credentials to `.env.local`. After the user confirms the env vars are set, re-run `phase4-login.js` and proceed to Phase 4.1.
 - **Max retries:** 0
 - **Lock impact:** none
@@ -672,9 +672,9 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 
 ### P4-AUTH-BYPASS-INSTRUCTIONS — Auth gates the route, UI-only build — emit bypass snippet
 
-- **Phase:** 4 (Phase 4.0d auth pre-flight)
+- **Phase:** 3.5 (§3.5d auth pre-flight)
 - **Tier:** inform
-- **Trigger:** Phase 4.0d auth detection (SKILL.md) determined the component's route is gated by login AND the build's intake answer for Q6 was `has_api_calls: "no"` (UI-only — no real API integration to exercise). Adding the route to a public-routes bypass is safe because there's no auth-protected business logic to skip.
+- **Trigger:** Phase 3.5d auth detection (SKILL.md) determined the component's route is gated by login AND the build's intake answer for Q6 was `has_api_calls: "no"` (UI-only — no real API integration to exercise). Adding the route to a public-routes bypass is safe because there's no auth-protected business logic to skip.
 - **Action:** Generate `$D2C_TMP/auth-bypass.md` containing a per-system snippet the user pastes into their auth config (next-auth → `auth.config.ts` `callbacks.authorized`; clerk → `middleware.ts` `publicRoutes: [...]`; supabase / middleware → middleware matcher exclusion). Log an inform-level notice with the file path. Pause once for the user to confirm they've applied the snippet (no STOP-AND-ASK prompt — just a `Press Enter to continue` blocker).
 - **Max retries:** N/A
 - **Lock impact:** none
@@ -689,7 +689,7 @@ When multiple failures fire in the same phase, present them in a single STOP AND
 
 ### P4-AUTH-LOGIN-FAILED — Login attempt did not produce a session
 
-- **Phase:** 4 (Phase 4.0d auth pre-flight, during `phase4-login.js`)
+- **Phase:** 3.5 (§3.5d auth pre-flight, during `phase4-login.js`)
 - **Tier:** stop-and-ask
 - **Trigger:** `phase4-login.js` filled the login form with `D2C_TEST_USER` / `D2C_TEST_PASSWORD` but did not see one of: a redirect away from the login URL, OR a session cookie matching the detected system's cookie name (`next-auth.session-token` for next-auth, `__session` for Clerk, `sb-access-token` for Supabase). The script exits 1 with `session_detected: none` in stdout. Likely causes: wrong creds, MFA blocking the login, or a custom login form selector the script didn't match.
 - **Action:** Halt. Surface the rendered HTML at the moment of failure (the script's `error:` line includes the last 500 chars), the URL the script was on, and the detected system. Ask the user to either (a) update `.env.local` with corrected credentials, (b) supply custom selectors via `--email-selector` / `--password-selector` / `--submit-selector` flags (will be persisted in `$D2C_TMP/auth-config.json`), or (c) abort.

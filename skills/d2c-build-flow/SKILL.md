@@ -34,6 +34,9 @@ These rules hold across every phase of this skill. No exceptions.
 9. **Never auto-generate Next buttons that weren't drawn in Figma.** If no interactive component in a page carries a `link_target`, emit a TODO comment and flag the edge as `inferred: true` in the report. Do not invent chrome to make the pixel-diff or the nav test "pass."
 10. **The report must echo the parsed step list.** Users verify intent by diffing "what I wrote" against "what you understood."
 11. **One argument controls flow shape: `mode:`.** It has four values — `auto` (default), `routes`, `stepper`, `hybrid`. When the user omits `mode:`, Phase 2a auto-detects from Figma per the 5-signal procedure in §Phase 2a step 3a and logs the chosen mode + per-signal reasons. Explicit `mode:` always wins. Auto-detection confidence below 0.55 aborts Phase 2a with a structured error listing signal scores — never silently picks a wrong shape.
+12. **Shared components are immutable.** Before modifying any file listed in `design-tokens.components[]`, read its `import_count` (the usage-count signal emitted by `/d2c-init`). `import_count ≤ 1` → the component is local to this flow and MAY be mutated to satisfy a Figma frame. `import_count > 1` (or the flow-level `shared_component_threshold` override) → the component is a shared dependency and is STRICTLY IMMUTABLE — no prop additions, no JSX edits, no style edits. Enforced in Phase 3 §"Component mutation boundary" and §5b F1-Flow. Violating a shared component fires **F-FLOW-SHARED-COMPONENT-MUTATION**.
+13. **Composition over modification.** When a shared component (rule 12) needs a per-step visual variation, create a step-scoped wrapper under `app/<route>/_components/<Step><Original>.tsx` (or the framework equivalent) that imports the original and applies local CSS / layout around it. NEVER append step-conditional props (`isStep2`, `hideAvatarOnCheckout`, `variant="checkout"`) to the shared component's prop signature — that's prop soup. Attempting to add a per-step boolean / enum to an immutable component fires **F-FLOW-WRAPPER-PROP-SOUP**.
+14. **Blast-radius reverification.** A flow-emitted file (shared layout, state context, orchestrator, shared wrapper created under rule 13) that was touched after a prior host already passed pixel-diff MUST trigger a re-diff of every earlier passing host that depends on that file. If the re-diff drops any earlier host below `--threshold`, HALT the auto-fix loop (no further rounds on the current host) and fire **F-FLOW-BLAST-RADIUS-REGRESSION** so the developer arbitrates — never enter a break-and-fix oscillation where step 3 keeps breaking step 1. Enforced in §Phase 4a.5.
 
 ---
 
@@ -43,6 +46,7 @@ Parse `$ARGUMENTS` for optional flags (in addition to the flow prompt):
 
 - **`--threshold <number>`** (default: **95**) — per-page pixel-diff threshold; forwarded to each page's `/d2c-build` Phase 4. Clamped to `[50, 100]`.
 - **`--max-rounds <number>`** (default: **4**) — per-page max auto-fix rounds; forwarded to each page's Phase 4. Clamped to `[1, 10]`.
+- **`--shared-component-threshold <number>`** (default: **2**) — `import_count` cutoff at which a component entry in `design-tokens.components[]` flips from *mutable* to *immutable* for this flow (rule 12). Any entry with `import_count >= threshold` is treated as shared. Clamped to `[2, 50]`. Lowering to `2` is the safe default; raising it is only useful in monorepos where an internal design system sits in the same `design-tokens.json` and every token-layer component naturally has `import_count ≥ 3`.
 - **`--yes`** — skip the Phase 1 confirm-or-edit gate; proceed immediately once parsing succeeds. Use for scripted/CI runs.
 
 Unknown flags are ignored with a one-line warning.
@@ -817,6 +821,76 @@ All six non-negotiables apply per page exactly as in `/d2c-build`. Reuse, tokens
 - **Placement.** Layout + `state/` + `_components/` all live at the longest common route prefix of the pages they serve. When pages don't share a common prefix, fall back to per-page layouts and no shared state.
 - **Conventions precedence.** If the project's `conventions` say `declare` via `function` but the layout template in the framework reference uses `default export function`, prefer the project convention (it's more strict).
 
+### Component mutation boundary (flow-rules 12 + 13)
+
+Before writing or editing any file that matches an existing entry in `design-tokens.components[]`, run this three-step check. The same check applies to any ad-hoc Figma-to-component codegen inside Phase 3, the per-step body dispatches into `/d2c-build`, AND the Phase 4a auto-fix loop — the boundary does not bend under pixel-diff pressure.
+
+**Step 1 — Classify the edit target.**
+
+Resolve the file path you are about to touch against `design-tokens.components[]` (match by `path`, resolved from project root). One of three outcomes:
+
+- **Not listed** — the file does not appear in `components[]`. It's either a freshly generated per-page/per-step file (owned by this flow) or a project file outside the design-system registry. Edits are unconstrained by this boundary; Phase 5a audit still applies.
+- **Listed with `import_count < threshold`** (default threshold `2`; override via `--shared-component-threshold`) — *mutable*. The component is used by at most the current feature branch, so JSX / style / prop edits are allowed. Re-read `import_count` freshly from `design-tokens.json` on every pass; do NOT cache across Phase 3 and Phase 4 rounds — if the file was imported elsewhere between rounds, the count changed and so does the classification.
+- **Listed with `import_count ≥ threshold`** — *immutable*. Treat the file as read-only for the remainder of the flow. Attempting to write to it fires **F-FLOW-SHARED-COMPONENT-MUTATION** (stop-and-ask) — no auto-recover, no "just this once" override.
+
+**Step 2 — When the target is immutable, switch to composition.**
+
+If the Figma frame demands a visual variation that the immutable component does not already expose through its existing props:
+
+1. Create a step-scoped wrapper at `app/<route>/_components/<StepOrHost><Original>.tsx` (App Router), `pages/<route>/_components/…` (Pages Router), or the framework-reference equivalent (see each `references/framework-*.md` §"Composition wrappers"). Name format: `<HostPascalCase><OriginalName>` — e.g. a `Checkout` step wrapping `Card` becomes `CheckoutCard.tsx`. The name is keyed on the consuming host so two hosts can wrap the same original side-by-side.
+2. The wrapper MUST `import { <Original> } from "<original path>"` and re-export a component whose only job is to apply the missing localised style / layout. Adjust spacing, background, border, typography using `design-tokens.json` values — never hardcoded. If the adjustment requires additional child content, render it via the wrapper's own JSX tree; do not forward it into the original via a new prop.
+3. The wrapper's prop surface must be a strict subset or identity of the original's — passing `...props` through is fine; adding new prop names (`isStep2`, `checkoutVariant`, `hideAvatar`) to the *original's* import signature is prop soup and fires **F-FLOW-WRAPPER-PROP-SOUP**. Wrappers MAY accept their own new props (that's their whole purpose), but those props must not bleed back into the immutable original.
+4. Register the wrapper in the per-page `component-match.json` as a `__NEW__` entry so Phase 5 audit and Phase 6 reuse metrics see it the same way they see any other generated component.
+
+**Step 3 — Log + echo in the Phase 6 report.**
+
+Every wrapper creation and every blocked mutation writes a line into `<run-dir>/flow/mutation-log.json` (append-only; created on first write) so Phase 6 can render a "Shared-component discipline" table in the report:
+
+```json
+{
+  "events": [
+    {
+      "ts": "2026-04-21T14:03:12Z",
+      "host": "/checkout",
+      "target_path": "src/components/Card.tsx",
+      "target_import_count": 7,
+      "action": "wrapper_created",
+      "wrapper_path": "app/checkout/_components/CheckoutCard.tsx",
+      "reason": "Card needs 16px extra bottom padding for the checkout layout; Card is shared (7 consumers) so mutation is forbidden."
+    },
+    {
+      "ts": "2026-04-21T14:07:48Z",
+      "host": "/onboarding/step-2",
+      "target_path": "src/components/Button.tsx",
+      "target_import_count": 12,
+      "action": "mutation_blocked",
+      "proposed_change": "Add `isStepperPrimary` boolean prop to force a different background.",
+      "resolution": "Wrapper OnboardingStepperNextButton created at app/onboarding/_components/OnboardingStepperNextButton.tsx."
+    }
+  ]
+}
+```
+
+Phase 5b §F1-Flow asserts every flow-emitted wrapper imports exactly one original and adds no new prop names to that original's call site. A wrapper that mutates the original via a non-JSX side-effect (e.g. `Object.assign(Card.defaultProps, …)`) is treated as a direct mutation and fires **F-FLOW-SHARED-COMPONENT-MUTATION**.
+
+**Worked example.** Figma for `/checkout` shows the same `<Card>` the rest of the app uses, but with a 16px extra bottom padding and a subtle amber left border. `Card.tsx` lives at `src/components/Card.tsx` with `import_count: 7`.
+
+- Step 1 classifies `Card.tsx` as immutable (7 ≥ 2).
+- Step 2 emits `app/checkout/_components/CheckoutCard.tsx`:
+  ```tsx
+  import { Card, type CardProps } from "@/components/Card";
+  import { tokens } from "@/design-tokens";
+  export function CheckoutCard(props: CardProps) {
+    return (
+      <div style={{ paddingBottom: tokens.spacing.md, borderLeft: `2px solid ${tokens.colors.accent.amber}` }}>
+        <Card {...props} />
+      </div>
+    );
+  }
+  ```
+- The `/checkout` page imports `CheckoutCard` instead of `Card`. `Card.tsx` is untouched.
+- `mutation-log.json` records one `wrapper_created` event; Phase 6 shows `/checkout` used the wrapper and why.
+
 ---
 
 ## Phase 4 — Visual Verification
@@ -1130,6 +1204,74 @@ After the fix dispatch, **re-run the walker for that host ONLY** (subset replay)
 
 5. **Shared-component blast-radius check.** Before applying any fix that would edit `state/<Group>Context.tsx` or the orchestrator (files used by every step), STOP-AND-ASK with **F-FLOW-WALKER-SHARED-BLAST**. Editing those files affects every step, so a fix that improves step 3 might regress steps 1, 2, and 4 — surface the blast radius before the user accepts the change.
 
+5a. **Blast-radius reverification (flow-rule #14).** The walker tracks which hosts have already passed pixel-diff AND which files each passing host rendered through. When a later round edits a file that a previously-passed host depends on, the walker MUST re-diff those earlier hosts before declaring the current round finished. This is what prevents the break-and-fix oscillation where fixing step 3 silently regresses step 1.
+
+   **File-dependency ledger** — maintain `<run-dir>/flow/walker-deps.json` in memory, seeded when a host passes §4a.4 for the first time. Schema:
+
+   ```json
+   {
+     "hosts_passed": [
+       {
+         "host_key": "<node_id>__desktop",
+         "route": "/checkout",
+         "final_score": 98.3,
+         "files": [
+           "app/checkout/page.tsx",
+           "app/checkout/_components/CheckoutCard.tsx",
+           "components/<flow_name>/OnboardingShell.tsx",
+           "app/checkout/state/CheckoutContext.tsx"
+         ]
+       }
+     ]
+   }
+   ```
+
+   Populate `files[]` from the union of:
+   - Every file the host's Phase 3 dispatch reported as written, created by computing the set `git status --porcelain` returned BEFORE → AFTER the per-page `/d2c-build` run (the flow wraps each page dispatch and diffs the working tree; no new machinery in `/d2c-build` is required).
+   - Every shared layout / state context / wrapper under `app/<common-prefix>/` or `components/<flow_name>/` that the host's file tree imports (resolve relative + `@/` aliases; ignore `node_modules`).
+   - Every step-body file reachable from a `page_type: "stepper_group"` host (collected the same way — `git status` before/after each step dispatch).
+
+   Exclude the design-tokens registry entries with `import_count >= --shared-component-threshold` — those are immutable (rule 12) and will never be touched by the auto-fix loop. Including them would fire spurious reverifications.
+
+   **Detection** — before running the round's pixel-diff (§4a.4) for the current failing host, compute `files_about_to_be_edited[]` from the planned `/d2c-build` fix dispatch (structured payload's `fix_target.file_path` plus any wrapper or layout file the planner intends to touch). Intersect against every `hosts_passed[i].files[]`:
+
+   ```
+   dependents = [h for h in hosts_passed if h.files ∩ files_about_to_be_edited ≠ ∅]
+   ```
+
+   - `dependents === []` → no blast radius. Proceed with the fix dispatch normally.
+   - `dependents` non-empty → the planned edit may ripple. Log `blast_radius_dependents: [<route>, …]` to the walker checkpoint (§4a.0c write protocol, same atomic tmp-rename) so a crash mid-round leaves a trail.
+
+   **Reverification pass** — after the fix dispatch completes AND the current host passes its own round pixel-diff (or plateaus at ≥ `PLATEAU_OK_THRESHOLD`), the walker re-runs the spec for every `dependents[i].host_key` using subset-replay (same mechanism as §4a.5 step 4's single-host subset). Each dependent re-runs exactly once per blast-radius event — no recursive blast-radius (a fix inside the reverification pass never triggers another reverification; the loop is bounded at depth 1 to prevent runaway sessions).
+
+   Compare each dependent's new score against its stored `final_score`:
+
+   | outcome | condition | action |
+   |---|---|---|
+   | `blast-clean` | every dependent stays ≥ `THRESHOLD` AND drop ≤ `REGRESSION_DELTA` | update `hosts_passed[i].final_score` to the new value, log `blast-clean` per dependent, continue the walker |
+   | `blast-minor` | any dependent stays ≥ `THRESHOLD` but drop > `REGRESSION_DELTA` | record `walker_blast_minor` warning via `_pending_audit_warnings[]` (per §Warnings surface rule 3 — routed to `audit.json.warnings[]`), do NOT revert, continue the walker |
+   | `blast-regression` | any dependent drops below `THRESHOLD` | HALT the auto-fix loop for the current host. Revert the current round's edit from the round-N snapshot (§4a.5 step 1). Fire **F-FLOW-BLAST-RADIUS-REGRESSION** (stop-and-ask). The prompt lists every dependent with old score → new score, the current host's old → new score, and the files that crossed the boundary. The user arbitrates between: (a) accept the regression and continue (the user acknowledges steps 1 & 3 conflict); (b) abort this round and leave the current host at its pre-fix score; (c) abort the entire walker pass so the developer can redesign the shared file manually. |
+
+   **Halt condition wording in the prompt** (required — the user needs to see the numbers, not a generic message):
+
+   > "Auto-fix for **{current_host.route}** edited **{files}** and re-diffing earlier passing hosts now shows:
+   >
+   >   /checkout  old=98.3% → new=91.7% (BELOW threshold {T}%) ← regressed
+   >   /dashboard old=97.1% → new=96.4% (still ≥ threshold)
+   >
+   > Current host score: {prev_score}% → {score}%.
+   >
+   > Fixing **{current_host.route}** is now breaking **/checkout**. I will NOT keep iterating between these two — that's an oscillation trap.
+   >
+   > Options:
+   >   (a) Accept: keep the edit, leave /checkout below threshold, log the regression in audit.json.
+   >   (b) Revert: roll back this round, leave {current_host.route} at {prev_score}%, finish the walker.
+   >   (c) Abort: stop the walker; fix the shared file manually before re-running."
+
+   **No auto-fix on the current host after this halt** — even if the user picks (a) or (b), the current host's auto-fix budget is marked exhausted for this Phase 4a pass. The next Phase 4a run (after the user's manual change to the shared file) starts the budget fresh.
+
+   **Why depth-1 is the right bound.** A reverification that itself auto-fixes the dependent would re-enter the same blast-radius check recursively — and a depth-3 failure of rule #14 would eat an afternoon of auto-fix before surfacing. Bounding the reverification to a single pixel-diff (no auto-fix) keeps the loop deterministic: either the dependents are clean and we continue, or the user gets a one-shot arbitration prompt.
+
 6. **Lock check.** Before any fix dispatch, verify the locked decisions still hold:
 
    ```bash
@@ -1312,6 +1454,13 @@ For every violation, emit a line in the format `violation: F<N>-Flow <file>:<lin
 
 Skip lowercase imports (hooks, utils, `useEffect`, `clsx`) — only PascalCase basenames are component candidates. Anything PascalCase that doesn't authorise → fire **F-FLOW-HONOR-COMPONENT-UNAUTHORIZED** (stop-and-ask).
 
+**F1-Flow also enforces flow-rules 12 + 13.** For every emitted file whose path matches a `design-tokens.components[]` entry:
+
+- If the file's git diff against the pre-flow state shows any modification AND the entry's `import_count ≥ --shared-component-threshold`, fire **F-FLOW-SHARED-COMPONENT-MUTATION** (stop-and-ask). "Emitted" here includes edits made by Phase 4a auto-fix — the audit catches Phase 4a drift, not just Phase 3 output.
+- If the file is a wrapper under `app/<route>/_components/` (or the framework equivalent) AND its single imported shared original (the first PascalCase import that resolves into `design-tokens.components[]`) is passed any prop name not present in the original's prop interface, fire **F-FLOW-WRAPPER-PROP-SOUP** (stop-and-ask). Resolve the prop interface via TypeScript's `tsc --noEmit --declaration` output or a lightweight AST pass over the original's source (`ts-morph` is acceptable if available; otherwise regex the `interface <Name>Props` / `type <Name>Props` block).
+
+Both checks run AFTER F-FLOW-HONOR-COMPONENT-UNAUTHORIZED so authorisation takes precedence — a rogue import is resolved before the mutation audit runs on a file that shouldn't have been there in the first place.
+
 **F2-Flow — Token usage.** Scan every Tailwind/inline `bg-[#hex]`, `text-[#hex]`, `border-[#hex]`, `bg-[rgba(...)]`, `p-[Npx]` etc. usage. Build a reverse-lookup map from `design-tokens.json` (`colors.<name>` → hex value). For each hardcoded hex / value, if it matches a token's value, the file should be using the semantic class (`bg-primary`) instead → fire **F-FLOW-HONOR-TOKEN-UNAUTHORIZED** (stop-and-ask). Hardcoded values that DON'T match any token are NOT flagged here (Phase 5a's per-page audit catches those).
 
 **F3-Flow — Orchestrator + state context prop contract.** Only fires for stepper / hybrid groups. For each `stepper_groups[g]`:
@@ -1361,6 +1510,7 @@ The flow-level report section is required. It sits at the top of the build summa
     - `Slot` cell renders `—` when the warning is not slot-scoped; `Node` renders `—` when `node_id` is absent.
     - Append a one-line header above the table: `<N> state-variant warnings — review before shipping.` (singular `warning` when N=1.) When N=0 (common for loaded-only flows and for fully-resolved full-variant flows), omit the entire section — no empty header, no empty table.
     - **Identity preservation:** the section never appears on loaded-only flows because Phase 4 never stages warnings on them (no stubs, no fallback, no mobile-counterpart drift on slots that don't exist). Combined with the identity collapse on the page scores table (rule 5), loaded-only flows produce the pre-change report shape exactly.
+11. **Shared-component discipline table (flow-rules 12 + 13 + 14).** Render when `<run-dir>/flow/mutation-log.json` exists AND its `events[]` is non-empty. Columns: `Host`, `Target`, `Import count`, `Action`, `Wrapper / reason`. Sort rows by `ts` ascending (chronological). Omit the whole section on clean runs (no mutation attempts, no wrappers). When `<run-dir>/flow/walker-deps.json.blast_radius_events[]` is non-empty (rule #14 fired during Phase 4a), append a second sub-table with columns `Current host`, `Dependent host`, `Before %`, `After %`, `Outcome` (`blast-clean` / `blast-minor` / `blast-regression`) grouped by `current_host` and sorted by event timestamp. This is how the developer audits whether the flow respected the immutability boundary and the blast-radius bound — the two rules that are easiest to violate quietly.
 
 ### Update `design-tokens.json.components[]`
 
@@ -1459,4 +1609,7 @@ See `references/failure-modes.md` for the full list. Quick reference:
 | 2a | F-FLOW-SHELL-DIVERGENT | inform |
 | 2a | F-FLOW-PROTOTYPE-CONTRADICTS-ORDER | inform |
 | 4b | F-FLOW-NAV-ASSERT-FAIL | inform |
+| 3 / 4a / 5b | F-FLOW-SHARED-COMPONENT-MUTATION | stop-and-ask |
+| 3 / 5b | F-FLOW-WRAPPER-PROP-SOUP | stop-and-ask |
+| 4a | F-FLOW-BLAST-RADIUS-REGRESSION | stop-and-ask |
 | any | FX-UNKNOWN-FAILURE | stop-and-ask |

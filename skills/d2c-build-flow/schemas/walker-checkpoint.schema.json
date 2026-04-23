@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://d2c.dev/ir/walker-checkpoint.schema.json",
   "title": "d2c Flow Walker Checkpoint",
-  "description": "Resume artifact for /d2c-build-flow Phase 4a. Mirrors skills/d2c-build/SKILL.md §Phase 4.0a-c (.d2c-build-checkpoint.json). Written atomically (write-tmp + rename) at the end of every walker round so an interrupted flow can resume from where it left off without restarting the entire walker. The flow_graph_hash field anchors this checkpoint to a specific flow-graph.json — a hash mismatch on resume fires F-FLOW-WALKER-CHECKPOINT-STALE (auto-recover; ignore stale checkpoint and start fresh).",
+  "description": "Resume artifact for /d2c-build-flow Phase 4a. Mirrors skills/d2c-build/SKILL.md §Phase 3.5a-c (.d2c-build-checkpoint.json). Written atomically (write-tmp + rename) at the end of every walker round so an interrupted flow can resume from where it left off without restarting the entire walker. The flow_graph_hash field anchors this checkpoint to a specific flow-graph.json — a hash mismatch on resume fires F-FLOW-WALKER-CHECKPOINT-STALE (auto-recover; ignore stale checkpoint and start fresh).",
   "type": "object",
   "required": [
     "schema_version",

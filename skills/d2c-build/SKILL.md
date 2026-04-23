@@ -862,28 +862,98 @@ This map MUST be written before the first verification round begins. It is consu
 
 ---
 
-## Phase 4: Visual Verification Loop
+## Phase 3.5: Visual Verification Prep
 
-> **MANDATORY GATE — Read before proceeding.** Before the first verification round, read `references/failure-modes.md` lines 1-91 (Meta-Rules section + Quick Reference table). Key failure modes in this phase: P4-DEV-SERVER, P4-REGRESSION, P4-PLATEAU, P4-IR-LOCK-CONFLICT, P4-FILE-OUT-OF-SCOPE, P4-SHARED-BLAST-RADIUS, P4-FIGMA-SCREENSHOT-UNSAVEABLE. If pixeldiff is unavailable, you MUST still complete all rounds using visual-only comparison — do NOT skip rounds or exit early.
+> **MANDATORY GATE — Read before proceeding.** Read `references/failure-modes.md` lines 1-91 (Meta-Rules section + Quick Reference table). Key failure modes in this phase: P4-AUTH-DETECTED-NO-CREDS, P4-AUTH-BYPASS-INSTRUCTIONS, P4-AUTH-LOGIN-FAILED. These failure IDs keep their `P4-` prefix for backward compatibility with existing `<!-- fm:… -->` anchors, but the phase that owns them is **3.5** as of this split.
 
-After generating the code, run this loop. **Maximum `MAX_ROUNDS` rounds** (default 4, configurable via `--max-rounds`).
+Phase 3.5 is the **one-shot preamble** for the visual-verification loop. It runs exactly once per `/d2c-build` invocation — never per round — and produces the artifacts every round of Phase 4 then consumes (`D2C_TMP` session directory, `auth-state.json` when auth is present, the checkpoint baseline). Separating it out means a preamble failure (auth misdetect, session-dir collision, login script error) is attributed to Phase 3.5 rather than blamed on the verification loop, and a resume from an interrupted build knows where the boundary is.
 
-### Context Management
+The loop (screenshot → compare → analyze → fix) is Phase 4. The two phases do NOT share a run directory — `D2C_TMP` is the Phase 3.5 output, consumed by Phase 4 but not owned by it.
 
-Once code generation (Phase 3) is complete, the framework reference file and intake question answers are no longer needed for verification. Prioritize keeping in context:
+### Sub-step status recording (shared with Phase 4)
 
-1. **The Figma screenshot(s)** — the design truth
-2. **The current Playwright screenshot** — what was actually rendered
-3. **The diff image** — highlights exactly what differs
-4. **The list of files created/modified** — to know what to fix
+Both Phase 3.5 and Phase 4 write per-sub-step status into the checkpoint so the final report can name the exact sub-step that blocked a build, rather than a generic "Phase 4 failed." Canonical sub-step names below (stable — downstream tooling filters on these strings):
 
-Design tokens are only needed if applying token-related fixes (e.g., wrong color, spacing). The full design-tokens.json can be re-read on demand rather than kept in context.
+| Phase | Sub-step name | Covers |
+|---|---|---|
+| 3.5 | `checkpoint_resume` | §3.5a reading/validating the prior checkpoint and the resume/fresh decision |
+| 3.5 | `session_dir` | §3.5b `mktemp` and the working directory creation |
+| 3.5 | `auth_detect` | §3.5d the first classifier pass (next-auth / clerk / supabase / middleware / none) |
+| 3.5 | `auth_gate` | §3.5d matcher parse + `route_gated` decision |
+| 3.5 | `auth_prep` | §3.5d running `phase4-login.js` or emitting the bypass snippet |
+| 4 | `screenshot` | §4.1 Playwright capture (primary + extra viewports) |
+| 4 | `dimension_check` | §4.1 aspect-ratio sanity check |
+| 4 | `figma_capture` | §4.2 Step A.1 Figma screenshot via the 5-method chain |
+| 4 | `pixeldiff` | §4.2 Step A.2 + A.3 the pixelmatch run and output parse |
+| 4 | `visual_judgment` | §4.2 Step B |
+| 4 | `analyze_diff` | §4.3a + 4.3b region mapping + fix list |
+| 4 | `determine_scope` | §4.3c file-scope resolution via `node_file_map` |
+| 4 | `blast_radius` | §4.3c shared-component blast-radius check |
+| 4 | `snapshot` | §4.4a pre-edit file snapshot |
+| 4 | `apply_fix` | §4.4 Decide branch (the edit itself; `skipped` when score ≥ THRESHOLD) |
+| 4 | `regression_check` | §4.4b compare current round vs previous |
+| 4 | `oscillation_check` | §4.4c last-3-scores range test |
+| 4 | `record_history` | §4.4d write the round entry to `round_history` |
 
-### 4.0 — Create Session Directory & Check for Resume
+Status values per sub-step: `"ok"` (ran cleanly), `"fail"` (hit a failure mode — record the failure id in the sibling `blocked_at_failure`), `"skipped"` (intentionally not run this round — e.g. `apply_fix` skipped when the score already passed), `"pending"` (started but a crash left it unresolved — only seen on the interrupted round after a resume).
 
-Before the first round, check for a previous interrupted build and create/restore the session directory.
+Recording protocol: every sub-step updates the checkpoint atomically (tmp + rename) at its own boundary — not deferred to round end — so a crash mid-round leaves an accurate audit trail. The block below shows the extended `round_history` entry (new fields are `sub_step_status`, `blocked_at_sub_step`, `blocked_at_failure`):
 
-**Step 4.0a — Check for checkpoint.**
+```json
+{
+  "round": 2,
+  "score": 88.1,
+  "delta": 15.8,
+  "files_edited": ["src/components/Header.tsx"],
+  "files_in_scope": ["src/components/Header.tsx", "src/components/Header.module.css"],
+  "fixes_applied": ["Fixed header bg color to bg-surface"],
+  "snapshot_dir": "/tmp/d2c-XXXXXX/snapshots/round-2",
+  "sub_step_status": {
+    "screenshot": "ok",
+    "dimension_check": "ok",
+    "figma_capture": "ok",
+    "pixeldiff": "ok",
+    "visual_judgment": "ok",
+    "analyze_diff": "ok",
+    "determine_scope": "ok",
+    "blast_radius": "ok",
+    "snapshot": "ok",
+    "apply_fix": "ok",
+    "regression_check": "ok",
+    "oscillation_check": "ok",
+    "record_history": "ok"
+  },
+  "blocked_at_sub_step": null,
+  "blocked_at_failure": null
+}
+```
+
+When a sub-step fails: set its status to `"fail"`, set `blocked_at_sub_step` to that sub-step's canonical name, set `blocked_at_failure` to the failure id (e.g. `"P4-DEV-SERVER"`), leave every subsequent sub-step as unset (or `"pending"` if it was mid-flight), persist the checkpoint, then fire the matching failure mode. Phase 6's report reads these fields to attribute the failure precisely — see §"Failure attribution" in Phase 6.
+
+Phase 3.5 maintains a **prep block** at the top level of the checkpoint (not per-round — it only runs once):
+
+```json
+{
+  "prep": {
+    "sub_step_status": {
+      "checkpoint_resume": "ok",
+      "session_dir": "ok",
+      "auth_detect": "ok",
+      "auth_gate": "ok",
+      "auth_prep": "ok"
+    },
+    "blocked_at_sub_step": null,
+    "blocked_at_failure": null,
+    "auth_system": "next-auth",
+    "route_gated": true,
+    "auth_path": "login"
+  }
+}
+```
+
+`auth_system` / `route_gated` / `auth_path` (`"none" | "bypass" | "login"`) are recorded here so Phase 4 knows which branch Phase 3.5 resolved to without re-running the detector.
+
+### 3.5a — Check for checkpoint
 
 Check if `.claude/d2c/.d2c-build-checkpoint.json` exists. If it does, read it and check if its `figma_url` matches the current build's Figma URL.
 
@@ -893,7 +963,9 @@ Check if `.claude/d2c/.d2c-build-checkpoint.json` exists. If it does, read it an
 - **If checkpoint exists but `figma_url` does NOT match:** Warn the user: "Found a checkpoint for a different Figma URL ({checkpoint.figma_url}). Ignoring it and starting fresh." Delete the stale checkpoint file.
 - **If no checkpoint exists:** Proceed normally.
 
-**Step 4.0b — Create session directory** (if not resuming).
+### 3.5b — Create session directory
+
+(if not resuming — on a resume, §3.5a's "Resume" branch already restored `$D2C_TMP` from the saved `session_dir`.)
 
 ```bash
 D2C_TMP=$(mktemp -d "${TMPDIR:-/tmp}/d2c-XXXXXX")
@@ -901,9 +973,9 @@ D2C_TMP=$(mktemp -d "${TMPDIR:-/tmp}/d2c-XXXXXX")
 
 All screenshots and diff images for this session go into `$D2C_TMP/`. This prevents collisions if multiple builds run concurrently.
 
-**Step 4.0c — Save checkpoint after each round.**
+### 3.5c — Save checkpoint after each round
 
-At the END of each verification round (after scoring in 4.2), save checkpoint state to `.claude/d2c/.d2c-build-checkpoint.json`:
+Save checkpoint state to `.claude/d2c/.d2c-build-checkpoint.json` atomically (write to a temp file, then rename) at two boundaries: (a) the end of each Phase 3.5 sub-step (§3.5a → §3.5d), which writes the top-level `prep` block, and (b) the end of each Phase 4 sub-step inside the current round's `round_history` entry. Writing at every sub-step boundary (not just round end) is what lets the final report name the exact blocker on a crash.
 
 ```json
 {
@@ -916,6 +988,20 @@ At the END of each verification round (after scoring in 4.2), save checkpoint st
   "ir_run_dir": ".claude/d2c/runs/2026-04-10T100000",
   "threshold": 95,
   "max_rounds": 4,
+  "prep": {
+    "sub_step_status": {
+      "checkpoint_resume": "ok",
+      "session_dir": "ok",
+      "auth_detect": "ok",
+      "auth_gate": "ok",
+      "auth_prep": "ok"
+    },
+    "blocked_at_sub_step": null,
+    "blocked_at_failure": null,
+    "auth_system": "next-auth",
+    "route_gated": true,
+    "auth_path": "login"
+  },
   "node_file_map": {
     "1:234": {
       "files": ["src/components/Header.tsx", "src/components/Header.module.css"],
@@ -936,7 +1022,24 @@ At the END of each verification round (after scoring in 4.2), save checkpoint st
       "files_edited": [],
       "files_in_scope": null,
       "fixes_applied": ["Initial generation"],
-      "snapshot_dir": null
+      "snapshot_dir": null,
+      "sub_step_status": {
+        "screenshot": "ok",
+        "dimension_check": "ok",
+        "figma_capture": "ok",
+        "pixeldiff": "ok",
+        "visual_judgment": "ok",
+        "analyze_diff": "ok",
+        "determine_scope": "skipped",
+        "blast_radius": "skipped",
+        "snapshot": "skipped",
+        "apply_fix": "skipped",
+        "regression_check": "skipped",
+        "oscillation_check": "skipped",
+        "record_history": "ok"
+      },
+      "blocked_at_sub_step": null,
+      "blocked_at_failure": null
     },
     {
       "round": 2,
@@ -945,24 +1048,51 @@ At the END of each verification round (after scoring in 4.2), save checkpoint st
       "files_edited": ["src/components/Header.tsx"],
       "files_in_scope": ["src/components/Header.tsx", "src/components/Header.module.css"],
       "fixes_applied": ["Fixed header bg color to bg-surface", "Fixed header padding to spacing.lg"],
-      "snapshot_dir": "/tmp/d2c-XXXXXX/snapshots/round-2"
+      "snapshot_dir": "/tmp/d2c-XXXXXX/snapshots/round-2",
+      "sub_step_status": {
+        "screenshot": "ok",
+        "dimension_check": "ok",
+        "figma_capture": "ok",
+        "pixeldiff": "ok",
+        "visual_judgment": "ok",
+        "analyze_diff": "ok",
+        "determine_scope": "ok",
+        "blast_radius": "ok",
+        "snapshot": "ok",
+        "apply_fix": "ok",
+        "regression_check": "ok",
+        "oscillation_check": "ok",
+        "record_history": "ok"
+      },
+      "blocked_at_sub_step": null,
+      "blocked_at_failure": null
     }
   ]
 }
 ```
 
-- `round`: the round number just completed (1-indexed)
-- `score`: the pixel-diff match percentage from this round
-- `files_touched`: cumulative list of all files created or modified during this build (deduplicated)
-- `session_dir`: absolute path to `$D2C_TMP`
+- `round`: the round number just completed (1-indexed). Absent from the checkpoint until round 1 records its first sub-step.
+- `score`: the pixel-diff match percentage from the most-recent completed round. Unset while a round is mid-flight.
+- `files_touched`: cumulative list of all files created or modified during this build (deduplicated).
+- `session_dir`: absolute path to `$D2C_TMP`.
 - `ir_run_dir`: path to the Phase 2 IR run directory (set in step 2.7). On resume, re-read the IR from this path rather than regenerating it. If `validate-ir.js` no longer exits 0 against the saved `ir_run_dir` (e.g. tokens file has changed), STOP AND ASK the user whether to regenerate IR — NEVER silently regenerate.
-- `threshold` and `max_rounds`: the effective values for this build
+- `threshold` and `max_rounds`: the effective values for this build.
+- `prep`: Phase 3.5 block. `sub_step_status` keys are the canonical 3.5-tier names from §"Sub-step status recording"; values are `"ok" | "fail" | "skipped" | "pending"`. `blocked_at_sub_step` / `blocked_at_failure` are non-null only when `prep` failed — the pair is how Phase 6's failure attribution locates the exact preamble step that blocked the build. `auth_system` / `route_gated` / `auth_path` capture §3.5d's resolution so Phase 4 doesn't re-detect.
 - `node_file_map`: populated at end of Phase 3 (Step 3.X). Maps each IR nodeId to the files generated for it, a human-readable label, and the Figma bounding box coordinates. Used by Step 4.3c for file-scoping. If absent (legacy checkpoint), all `files_touched` are in scope.
-- `round_history`: array of per-round state. Grows with each round. Used for regression detection (score drop > 1pp), oscillation detection (last 3 scores within 2pp range), and the build report. Each entry records the round number, score, delta from previous round, files edited, files that were in scope, human-readable fix descriptions, and snapshot directory (for revert on regression). Round 1's `files_edited` is empty (initial generation), `files_in_scope` is `null` (all files), and `snapshot_dir` is `null` (no pre-edit state to revert to).
+- `round_history`: array of per-round state. Grows with each round. Each entry records the round number, score, delta from previous round, files edited, files in scope, human-readable fix descriptions, snapshot directory, the per-round `sub_step_status` map (keys are the canonical Phase-4-tier names), and the two blocker fields. Round 1's `files_edited` is empty (initial generation), `files_in_scope` is `null` (all files), `snapshot_dir` is `null` (no prior state to revert to), and its mutating sub-steps (`determine_scope`, `blast_radius`, `snapshot`, `apply_fix`, `regression_check`, `oscillation_check`) record `"skipped"` because round 1 only observes — it doesn't fix.
 
-Write the checkpoint file atomically (write to a temp file, then rename). This ensures a crash mid-write does not corrupt the checkpoint.
+**Sub-step status transitions:**
 
-### 4.0d — Auth detection + handling
+| Transition | When |
+|---|---|
+| `unset → ok` | Sub-step ran cleanly and wrote any side-effects it owns. |
+| `unset → skipped` | Sub-step was intentionally bypassed this round (e.g. `apply_fix: "skipped"` when the round's score already ≥ THRESHOLD; `blast_radius: "skipped"` when the component isn't shared). |
+| `unset → pending` | Sub-step started a long-running operation (Playwright screenshot, pixeldiff) that may crash before completing. Update to `ok`/`fail` on completion; a `pending` seen after a resume means the operation was interrupted. |
+| `unset → fail` | Sub-step hit a failure mode. Populate `blocked_at_sub_step` with this sub-step's canonical name and `blocked_at_failure` with the failure id, then fire the matching stop-and-ask / auto-recover path. Downstream sub-steps in the same round stay unset. |
+
+**Writing rule.** Every status transition is an atomic tmp + rename. Do NOT batch multiple transitions into a single write — the whole point is that a crash between sub-step 7 and sub-step 8 leaves a checkpoint where 7 is `"ok"` and 8 is unset (or `"pending"` if it had already started).
+
+### 3.5d — Auth detection + handling
 
 Before the first screenshot, scan the project for an auth system. If the component's route is gated by login, every Phase 4 screenshot will silently render the login page instead of the actual component, every pixel-diff will fail, and the auto-fix loop will spend its budget chasing visual regressions that are actually auth redirects.
 
@@ -1031,6 +1161,27 @@ When this section produces `$D2C_TMP/auth-state.json`, every subsequent Phase 4 
 
 <!-- fm:P4-AUTH-DETECTED-NO-CREDS, P4-AUTH-BYPASS-INSTRUCTIONS, P4-AUTH-LOGIN-FAILED -->
 
+Phase 3.5 exits when every sub-step in the prep block resolves to `"ok"` (or `auth_prep` is `"skipped"` when `system === "none"`). At that point the checkpoint's `prep.sub_step_status` is fully populated, `D2C_TMP` is created, and — on the auth paths — `$D2C_TMP/auth-state.json` OR `$D2C_TMP/auth-bypass.md` exists. Proceed to Phase 4.
+
+---
+
+## Phase 4: Visual Verification Loop
+
+> **MANDATORY GATE — Read before proceeding.** Before the first verification round, read `references/failure-modes.md` lines 1-91 (Meta-Rules section + Quick Reference table). Key failure modes in this phase: P4-DEV-SERVER, P4-REGRESSION, P4-PLATEAU, P4-IR-LOCK-CONFLICT, P4-FILE-OUT-OF-SCOPE, P4-SHARED-BLAST-RADIUS, P4-FIGMA-SCREENSHOT-UNSAVEABLE. If pixeldiff is unavailable, you MUST still complete all rounds using visual-only comparison — do NOT skip rounds or exit early.
+
+After Phase 3.5 completes, run this loop. **Maximum `MAX_ROUNDS` rounds** (default 4, configurable via `--max-rounds`). Every sub-step in every round records its status into the checkpoint per the §"Sub-step status recording" contract in Phase 3.5 — consult that table for the canonical sub-step names.
+
+### Context Management
+
+Once code generation (Phase 3) is complete, the framework reference file and intake question answers are no longer needed for verification. Prioritize keeping in context:
+
+1. **The Figma screenshot(s)** — the design truth
+2. **The current Playwright screenshot** — what was actually rendered
+3. **The diff image** — highlights exactly what differs
+4. **The list of files created/modified** — to know what to fix
+
+Design tokens are only needed if applying token-related fixes (e.g., wrong color, spacing). The full design-tokens.json can be re-read on demand rather than kept in context.
+
 ### 4.1 — Take a Screenshot
 Use the Playwright CLI (globally installed) via Bash to capture screenshots:
 
@@ -1042,7 +1193,7 @@ npx playwright screenshot --viewport-size="1280,800" --timeout=10000 <dev-server
 2. If multiple viewports, run additional commands at each viewport width (e.g., `--viewport-size="768,1024"` for tablet, `--viewport-size="375,812"` for mobile).
 3. Read the resulting screenshot file(s) to load them into context for comparison.
 
-**Branch on auth-state presence.** When `$D2C_TMP/auth-state.json` exists (produced by Phase 4.0d path 3), the bare `npx playwright screenshot` CLI cannot load it — that CLI doesn't accept `storageState`. Use the auth-aware helper instead:
+**Branch on auth-state presence.** When `$D2C_TMP/auth-state.json` exists (produced by Phase 3.5d path 3), the bare `npx playwright screenshot` CLI cannot load it — that CLI doesn't accept `storageState`. Use the auth-aware helper instead:
 
 ```bash
 node skills/d2c-build/scripts/screenshot-with-auth.js \
@@ -1220,6 +1371,8 @@ Example fix list:
 > 2. **Card spacing** (middle section) — red outlines around cards → gap is `gap-4` but should be `gap-6` → ~2,000 red pixels
 > 3. **Body text** (scattered red in paragraphs) → font size is `text-sm` but should be `text-base` → ~1,500 red pixels
 
+When two or more issues have similar red-pixel density (within ~10% of each other) and the ordering is genuinely ambiguous, break ties using the priority ladder in `references/fix-priority.md`. The ladder also documents exceptions — token-cascade risk, IR `failed_by` hints, and explicit user guidance all override the default order.
+
 **Step 4.3c: Determine file scope for this round.**
 
 <!-- fm:P4-FILE-OUT-OF-SCOPE, P4-SHARED-BLAST-RADIUS -->
@@ -1315,16 +1468,6 @@ Use the gating score from Step C (pixel-diff `100 - error%` if available, otherw
 
 <!-- fm:P4-MAX-ROUNDS -->
 - **Round `MAX_ROUNDS` reached regardless of score** (default 4): Stop. Show the user the current state, pixel-diff score, the diff image, and remaining issues. List the specific red regions that still differ and explain what would need manual adjustment.
-
-### 4.5 — Fix Priority Order
-
-When multiple issues have similar red pixel density, prioritize in this order:
-1. Structural/layout issues (wrong grid, missing sections, incorrect ordering) — these cause the most red pixels
-2. Color mismatches (wrong backgrounds, text colors) — large solid blocks of red
-3. Spacing issues (wrong gaps, padding, margins) — red outlines and strips
-4. Typography mismatches (font size, weight, line-height) — scattered red in text
-5. Border radius, shadow, and decorative differences — small red areas
-6. Fine-grained alignment and sub-pixel polish — minimal red pixels
 
 ---
 
@@ -1493,6 +1636,26 @@ After the audit:
    | Lines Generated     | 187   |
    | Audit Issues Fixed  | 4     |
    ```
+
+   **Table 4 — Failure attribution (only when the build did NOT pass cleanly).**
+
+   Omit this table entirely when every `sub_step_status` across `prep` and every `round_history[i]` is `"ok"` or `"skipped"`. Otherwise render one row per `"fail"` sub-step, sourced from the checkpoint. This is what makes a non-passing build actionable — the user sees the exact sub-step that blocked, not a generic "Phase 4 failed."
+
+   ```
+   | Phase | Round | Sub-step            | Failure id               | Files touched         |
+   |-------|-------|---------------------|--------------------------|-----------------------|
+   | 3.5   | —     | auth_prep           | P4-AUTH-LOGIN-FAILED     | —                     |
+   | 4     | 3     | pixeldiff           | P4-FIGMA-SCREENSHOT-…    | —                     |
+   | 4     | 4     | apply_fix           | P4-SHARED-BLAST-RADIUS   | src/components/Card…  |
+   ```
+
+   Render rules:
+   - `Phase` column: `3.5` for entries sourced from `prep.blocked_at_sub_step`; `4` for entries sourced from `round_history[i].blocked_at_sub_step`. A single build can produce at most one Phase 3.5 row (prep runs once).
+   - `Round` column: `—` for Phase 3.5 rows; 1-indexed round number for Phase 4 rows.
+   - `Sub-step` column: the canonical name from §"Sub-step status recording" — keep the snake_case form so downstream tooling can filter.
+   - `Failure id` column: the `blocked_at_failure` value (e.g. `P4-DEV-SERVER`). Rendered without trailing whitespace so a grep for `P4-*` across build reports produces a clean list.
+   - `Files touched` column: the `files_edited` from the same round entry, semicolon-separated. `—` when empty (e.g. preamble failures and observation-only rounds).
+   - Sort rows chronologically: Phase 3.5 row first, then Phase 4 rows by `round` ascending. Preserves the "what blocked first?" reading order.
 
    **Table 4 — IR Summary**
 

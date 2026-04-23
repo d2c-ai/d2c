@@ -92,6 +92,9 @@ Inherits the meta-rules from `skills/d2c-build/references/failure-modes.md`:
 | F-FLOW-HONOR-PROP-CONTRACT | 5 | stop-and-ask | Orchestrator or state context violates the step prop contract (`framework-react-next.md` §"Step component prop contract") |
 | F-FLOW-HONOR-EDGE-MISSING | 5 | inform | Nav-smoke spec doesn't assert a route from `flow-graph.edges[]` |
 | F-FLOW-HONOR-WALKER-COVERAGE | 5 | inform | Flow-walker spec doesn't cover a host (page or stepper-step loaded slot) at every required viewport |
+| F-FLOW-SHARED-COMPONENT-MUTATION | 3 / 4a / 5b | stop-and-ask | Codegen or auto-fix tried to write to a `design-tokens.components[]` entry whose `import_count ≥ --shared-component-threshold` (flow-rule #12) |
+| F-FLOW-WRAPPER-PROP-SOUP | 3 / 5b | stop-and-ask | A shared component's prop signature would gain a step-scoped prop (`isStep2`, `checkoutVariant`, …) — flow-rule #13 requires a wrapper instead |
+| F-FLOW-BLAST-RADIUS-REGRESSION | 4a | stop-and-ask | Auto-fix for the current host dropped a previously passing host below `--threshold`; flow-rule #14 halts the oscillation |
 | FX-UNKNOWN-FAILURE | X | stop-and-ask | Unrecognized failure (catch-all) |
 
 ---
@@ -960,6 +963,83 @@ These five entries cover violations surfaced by SKILL.md §5b's Bucket F-Flow en
 
 **Log line:**
 > "Walker spec missing coverage for host {node_id} ({route}, viewport={viewport}). Added TODO; the walker will not pixel-diff this host until you add the test() block."
+
+---
+
+## Component mutation boundary (flow-rules 12 + 13 + 14)
+
+### F-FLOW-SHARED-COMPONENT-MUTATION — Attempt to edit a shared component
+
+- **Phase:** 3 (codegen) / 4a (auto-fix) / 5b (F1-Flow audit)
+- **Tier:** stop-and-ask
+- **Trigger:** A planned `Write` or `Edit` targets a file whose `path` matches a `design-tokens.components[]` entry with `import_count ≥ --shared-component-threshold` (default `2`). The three entry points: (1) Phase 3 §"Component mutation boundary" Step 1 classifies the target as immutable; (2) Phase 4a.5 fix dispatch's `fix_target.file_path` resolves to an immutable component; (3) Phase 5b F1-Flow audit finds a diff that mutated an immutable component between IR and emitted code.
+- **Action:** Halt **before** writing. Show the component's path, its `import_count`, and the current threshold. Offer composition (the default recommendation), a threshold raise (only if every consumer is part of this flow), or abort. Do NOT silently proceed — the mutation is denied even if the user types "yes" without picking one of the options below.
+- **Max retries:** 0 (every re-attempt at the same path re-fires this failure; the user must pick one of the options).
+- **Lock impact:** none directly. Option (b) writes a new wrapper file (not a locked decision); option (c) may update `--shared-component-threshold` for the remainder of the run, which is NOT persisted in `flow-decisions-lock.json` — it's a per-invocation override.
+- **Related rule:** Flow-rule #12 (Shared components are immutable). Anti-rationalization: a pixel-diff pressure in Phase 4a is NOT license to edit `Button.tsx` — the pressure is exactly when this rule earns its keep.
+
+**User prompt:**
+> "I was about to edit **{target_path}** to satisfy **{host_route}**, but this component has `import_count: {N}` in design-tokens.json — that's above the shared-component threshold ({threshold}), so editing it would ripple into {N} other consumers across the codebase.
+>
+> Flow-rule #12: shared components are immutable. Options:
+>   (a) **Wrap** (recommended) — I'll create `app/{route}/_components/{Host}{Original}.tsx` that imports {Original} and applies the visual delta as a local wrapper. The original stays untouched.
+>   (b) **Show consumers** — let me list the {N} files that import {Original} so you can decide whether a codebase-wide change is appropriate.
+>   (c) **Raise threshold** — re-run with `--shared-component-threshold {N+1}` (only sane when every consumer is part of THIS flow).
+>   (d) **Abort** — stop the flow; I'll redesign the shared component manually outside /d2c-build-flow."
+
+**Context to show:** The target path, its `import_count`, the current threshold, the list of consumers (the file paths that import the component — resolve via a grep on the component's default export name), and the emitted Figma frame URL that motivated the edit.
+
+---
+
+### F-FLOW-WRAPPER-PROP-SOUP — Step-scoped prop added to a shared component
+
+- **Phase:** 3 (codegen) / 5b (F1-Flow audit)
+- **Tier:** stop-and-ask
+- **Trigger:** A planned or emitted wrapper file adds a prop name to its imported original's call site that doesn't exist in the original's current prop signature. Detected via (1) Phase 3 AST scan of the wrapper's `<Original …>` JSX vs. the original's prop interface, or (2) Phase 5b F1-Flow running the same scan on every committed wrapper. Also fires when the proposed edit is a direct mutation to the shared component's prop interface itself (typing `interface ButtonProps { isCheckout?: boolean; }` into `Button.tsx`).
+- **Action:** Halt. Name the offending prop(s). Suggest the two canonical alternatives: render the variation in the wrapper's own JSX, or apply the variation via a wrapping `<div>` + design-token style. Refuse to apply the prop-soup fix even under `--yes`.
+- **Max retries:** 0
+- **Lock impact:** none
+- **Related rule:** Flow-rule #13 (Composition over modification). Anti-rationalization: a one-line `variant="checkout"` prop feels harmless, but it converts a single-purpose shared component into a conditionally-rendered branch factory — the exact drift rule #13 exists to prevent.
+
+**User prompt:**
+> "I was about to add prop **{prop_name}** to **{original_name}** at **{wrapper_path}** to wire the {host_route} variant. But {original_name} is a shared component (rule #12), so its prop surface is frozen and this addition would be prop soup (rule #13).
+>
+> Options:
+>   (a) **Render it in the wrapper** — I'll lift the {prop_name}-triggered UI into {wrapper_path}'s own JSX tree instead of forwarding it into {original_name}. {original_name} stays single-purpose.
+>   (b) **Style-only variation** — if the delta is purely visual (padding/border/color), I'll emit `<div style={{…}}>{original}</div>` using design-tokens values and drop the prop entirely.
+>   (c) **Legitimize the prop** — the variation is truly general-purpose, not step-scoped. Abort the flow run, add the prop to {original_name} yourself (with tests), update design-tokens.components[], then re-run.
+>   (d) **Abort** — stop the flow."
+
+**Context to show:** The wrapper path, the offending prop name, the original's current prop interface (as a code block), and the planned JSX usage that introduced the prop.
+
+---
+
+### F-FLOW-BLAST-RADIUS-REGRESSION — Fixing current host regressed an earlier passing host
+
+- **Phase:** 4a (auto-fix loop, inside §4a.5 step 5a reverification pass)
+- **Tier:** stop-and-ask
+- **Trigger:** Inside §4a.5 step 5a's reverification pass, one or more dependents (hosts that already passed pixel-diff in this walker run) dropped below `--threshold` after the current host's fix dispatch edited a shared file. See the `blast-regression` row in §4a.5 step 5a's outcome table.
+- **Action:** Revert the current round from the round-N snapshot (§4a.5 step 1). Mark the current host's auto-fix budget exhausted for this Phase 4a pass (no more rounds even if the user picks "accept" below). Halt and ask the user to arbitrate — the system is not allowed to keep iterating between the two hosts, that's an oscillation trap the rule exists to prevent.
+- **Max retries:** 0 (by construction — the whole point is to stop after one round of break-and-fix).
+- **Lock impact:** none directly. Option (a) records the regression in `audit.json.warnings[]` (kind = `blast_radius_accepted`); option (c) persists no state since the walker ends.
+- **Related rule:** Flow-rule #14 (Blast-radius reverification). Anti-rationalization: the natural instinct is "let me try one more round, maybe it'll converge" — that's precisely the oscillation this failure halts.
+
+**User prompt:**
+> "Auto-fix for **{current_host.route}** edited **{files}** and re-diffing earlier passing hosts now shows:
+>
+>   {dependent_1.route}  old={d1.old}% → new={d1.new}% ({below_or_above threshold})
+>   {dependent_2.route}  old={d2.old}% → new={d2.new}% ({below_or_above threshold})
+>
+> Current host score: {prev_score}% → {score}%.
+>
+> Fixing **{current_host.route}** is now breaking **{regressed_dependents}**. I will NOT keep iterating between these — that's an oscillation trap.
+>
+> Options:
+>   (a) **Accept** — keep the edit, leave {regressed_dependents} below threshold, record `blast_radius_accepted` in audit.json. The walker continues to the next host.
+>   (b) **Revert** — roll this round back, leave {current_host.route} at {prev_score}%. The walker continues to the next host.
+>   (c) **Abort** — stop the walker; fix the shared file manually before re-running (recommended when two designs genuinely disagree on the shared component's shape)."
+
+**Context to show:** Every `dependent.host_key` with old score / new score / pass-fail against threshold; the list of files the fix edited; the current host's score trajectory; and the files' identities so the user knows which shared file is in contention.
 
 ---
 
